@@ -1,0 +1,325 @@
+package com.example.ui.screens
+
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CenterFocusStrong
+import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Save
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.unit.dp
+import com.example.data.db.TrainingProfileEntity
+import com.example.ui.i18n.BotCopy
+import com.example.ui.theme.AmberPulse
+import com.example.ui.theme.CrimsonAlert
+import com.example.ui.theme.CyanElectric
+import com.example.ui.theme.EmeraldNeon
+import com.example.ui.viewmodel.ScreenshotTestState
+
+@Composable
+fun CalibratorScreen(
+    copy: BotCopy,
+    isUrdu: Boolean,
+    profile: TrainingProfileEntity?,
+    screenshotState: ScreenshotTestState,
+    onPickScreenshot: (android.net.Uri) -> Unit,
+    onSaveCalibration: (Float, Float, Float, Float, Float, Float, Float, Float, Float, Float) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val photoPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        if (uri != null) {
+            onPickScreenshot(uri)
+        }
+    }
+
+    var tableLeft by remember(profile?.id) { mutableFloatStateOf(profile?.tableLeft ?: 0.16f) }
+    var tableTop by remember(profile?.id) { mutableFloatStateOf(profile?.tableTop ?: 0.18f) }
+    var tableRight by remember(profile?.id) { mutableFloatStateOf(profile?.tableRight ?: 0.83f) }
+    var tableBottom by remember(profile?.id) { mutableFloatStateOf(profile?.tableBottom ?: 0.95f) }
+    var powerBarX by remember(profile?.id) { mutableFloatStateOf(profile?.powerBarX ?: 0.072f) }
+    var turnBoxX by remember(profile?.id) { mutableFloatStateOf(profile?.turnBoxX ?: 0.43f) }
+    var turnBoxY by remember(profile?.id) { mutableFloatStateOf(profile?.turnBoxY ?: 0.08f) }
+    var tapLeftX by remember(profile?.id) { mutableFloatStateOf(profile?.tapLeftX ?: 0.20f) }
+    var tapCenterY by remember(profile?.id) { mutableFloatStateOf(profile?.tapCenterY ?: 0.75f) }
+    var tapRightX by remember(profile?.id) { mutableFloatStateOf(profile?.tapRightX ?: 0.80f) }
+
+    val isPoolMode = (profile?.botMode ?: "POOL_AIM") == "POOL_AIM"
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        item {
+            Text(
+                text = copy.calibratorTitle,
+                style = MaterialTheme.typography.headlineSmall
+            )
+            Text(
+                text = if (isUrdu) {
+                    "اپنی اصل گیم کا اسکرین شاٹ منتخب کر کے چیک کریں کہ بوٹ بالز، پاکٹس، ٹرن بارڈر اور نشانہ صحیح پڑھ رہا ہے یا نہیں۔"
+                } else {
+                    "Pick any real game screenshot from your gallery to verify ball/table vision detection and tune screen zones."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+
+        item {
+            FilledTonalButton(
+                onClick = {
+                    photoPickerLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .minimumInteractiveComponentSize()
+                    .testTag("btn_pick_screenshot")
+            ) {
+                Icon(Icons.Filled.PhotoLibrary, contentDescription = null)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    if (isUrdu) "گیم اسکرین شاٹ پر ویژن ٹیسٹ کریں" else "Test Vision on Game Screenshot"
+                )
+            }
+        }
+
+        // Visual Calibration & Detection Overlay Preview
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val bmp = screenshotState.previewBitmap
+                    val aspect = if (bmp != null && bmp.height > 0) {
+                        (bmp.width.toFloat() / bmp.height).coerceIn(0.45f, 2.25f)
+                    } else if (isPoolMode) {
+                        2.1f
+                    } else {
+                        0.65f
+                    }
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(aspect)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(Color(0xFF060A12))
+                            .border(1.dp, CyanElectric.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+                    ) {
+                        if (bmp != null) {
+                            Image(
+                                bitmap = bmp.asImageBitmap(),
+                                contentDescription = "Analyzed game screenshot",
+                                contentScale = ContentScale.FillBounds,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+
+                        Canvas(modifier = Modifier.fillMaxSize()) {
+                            if (isPoolMode) {
+                                // Table bounds
+                                drawRect(
+                                    color = CyanElectric,
+                                    topLeft = Offset(tableLeft * size.width, tableTop * size.height),
+                                    size = Size(
+                                        (tableRight - tableLeft) * size.width,
+                                        (tableBottom - tableTop) * size.height
+                                    ),
+                                    style = Stroke(width = 2.dp.toPx())
+                                )
+                                // Power bar zone
+                                drawLine(
+                                    color = AmberPulse,
+                                    start = Offset(powerBarX * size.width, (profile?.powerBarTopY ?: 0.27f) * size.height),
+                                    end = Offset(powerBarX * size.width, (profile?.powerBarBottomY ?: 0.84f) * size.height),
+                                    strokeWidth = 4.dp.toPx()
+                                )
+                                // Turn indicator box
+                                drawCircle(
+                                    color = EmeraldNeon,
+                                    radius = 12.dp.toPx(),
+                                    center = Offset(turnBoxX * size.width, turnBoxY * size.height),
+                                    style = Stroke(width = 2.dp.toPx())
+                                )
+
+                                // Detected balls + planned shot vector
+                                val analysis = screenshotState.poolAnalysis
+                                if (analysis != null) {
+                                    analysis.pockets.forEach { pocket ->
+                                        drawCircle(
+                                            color = CyanElectric.copy(alpha = 0.6f),
+                                            radius = 6.dp.toPx(),
+                                            center = Offset(pocket.normX * size.width, pocket.normY * size.height),
+                                            style = Stroke(width = 1.5.dp.toPx())
+                                        )
+                                    }
+                                    analysis.targetBalls.forEach { ball ->
+                                        drawCircle(
+                                            color = EmeraldNeon,
+                                            radius = 8.dp.toPx(),
+                                            center = Offset(ball.normX * size.width, ball.normY * size.height),
+                                            style = Stroke(width = 2.dp.toPx())
+                                        )
+                                    }
+                                    analysis.cueBall?.let { cue ->
+                                        drawCircle(
+                                            color = Color.White,
+                                            radius = 10.dp.toPx(),
+                                            center = Offset(cue.normX * size.width, cue.normY * size.height),
+                                            style = Stroke(width = 2.5.dp.toPx())
+                                        )
+                                    }
+                                    analysis.plannedShot?.let { shot ->
+                                        val cuePt = Offset(shot.cueBall.normX * size.width, shot.cueBall.normY * size.height)
+                                        val aimPt = Offset(shot.aimPointX * size.width, shot.aimPointY * size.height)
+                                        val targetPt = Offset(shot.targetBall.normX * size.width, shot.targetBall.normY * size.height)
+                                        val pocketPt = Offset(shot.pocket.normX * size.width, shot.pocket.normY * size.height)
+                                        drawLine(color = Color.White, start = cuePt, end = aimPt, strokeWidth = 2.5.dp.toPx())
+                                        drawLine(color = AmberPulse, start = targetPt, end = pocketPt, strokeWidth = 2.5.dp.toPx())
+                                    }
+                                }
+                            } else {
+                                // General tap markers
+                                drawCircle(CyanElectric, 10.dp.toPx(), Offset(tapLeftX * size.width, (profile?.tapLeftY ?: 0.78f) * size.height))
+                                drawCircle(EmeraldNeon, 10.dp.toPx(), Offset((profile?.tapCenterX ?: 0.50f) * size.width, tapCenterY * size.height))
+                                drawCircle(AmberPulse, 10.dp.toPx(), Offset(tapRightX * size.width, (profile?.tapRightY ?: 0.78f) * size.height))
+                            }
+                        }
+                    }
+
+                    val analysis = screenshotState.poolAnalysis
+                    if (analysis != null) {
+                        Text(
+                            text = analysis.summary,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (analysis.isMyTurn) EmeraldNeon else AmberPulse
+                        )
+                        analysis.plannedShot?.let { shot ->
+                            Text(
+                                text = "Best Shot: ${shot.stateSummary} • Power ${(shot.basePowerFraction * 100).toInt()}%",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanElectric
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calibration sliders
+        item {
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Filled.CenterFocusStrong, contentDescription = null, tint = CyanElectric)
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isPoolMode) {
+                                if (isUrdu) "پول ٹیبل اور پاور بار کیلیبریشن" else "Table, Power Bar & Turn Calibration"
+                            } else {
+                                if (isUrdu) "ٹیپ زون کیلیبریشن" else "Tap & Swipe Zone Calibration"
+                            },
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                    }
+
+                    if (isPoolMode) {
+                        Text("Table Left: ${(tableLeft * 100).toInt()}%  |  Table Right: ${(tableRight * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = tableLeft, onValueChange = { tableLeft = it.coerceAtMost(tableRight - 0.30f) }, valueRange = 0.08f..0.40f)
+                        Slider(value = tableRight, onValueChange = { tableRight = it.coerceAtLeast(tableLeft + 0.30f) }, valueRange = 0.60f..0.94f)
+
+                        Text("Table Top: ${(tableTop * 100).toInt()}%  |  Table Bottom: ${(tableBottom * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = tableTop, onValueChange = { tableTop = it.coerceAtMost(tableBottom - 0.30f) }, valueRange = 0.08f..0.42f)
+                        Slider(value = tableBottom, onValueChange = { tableBottom = it.coerceAtLeast(tableTop + 0.30f) }, valueRange = 0.65f..0.98f)
+
+                        Text("Power Slider X: ${(powerBarX * 100).toInt()}%  |  Turn Indicator: (${(turnBoxX * 100).toInt()}%, ${(turnBoxY * 100).toInt()}%)", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = powerBarX, onValueChange = { powerBarX = it }, valueRange = 0.03f..0.16f)
+                        Slider(value = turnBoxX, onValueChange = { turnBoxX = it }, valueRange = 0.25f..0.75f)
+                    } else {
+                        Text("Left Tap X: ${(tapLeftX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = tapLeftX, onValueChange = { tapLeftX = it }, valueRange = 0.08f..0.40f)
+                        Text("Center Tap Y: ${(tapCenterY * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = tapCenterY, onValueChange = { tapCenterY = it }, valueRange = 0.40f..0.90f)
+                        Text("Right Tap X: ${(tapRightX * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+                        Slider(value = tapRightX, onValueChange = { tapRightX = it }, valueRange = 0.60f..0.92f)
+                    }
+
+                    Button(
+                        onClick = {
+                            onSaveCalibration(
+                                tableLeft, tableTop, tableRight, tableBottom,
+                                powerBarX, turnBoxX, turnBoxY,
+                                tapLeftX, tapCenterY, tapRightX
+                            )
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .minimumInteractiveComponentSize()
+                            .testTag("btn_save_zones")
+                    ) {
+                        Icon(Icons.Filled.Save, contentDescription = null)
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(if (isUrdu) "کیلیبریشن محفوظ کریں" else "Save Calibration")
+                    }
+                }
+            }
+        }
+    }
+}

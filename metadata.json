@@ -1,0 +1,6 @@
+{
+  "name": "NeuroBot",
+  "description": "Autonomous screen-reading and self-training game bot with on-device Q-learning memory and live screen automation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
