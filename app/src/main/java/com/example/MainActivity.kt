@@ -225,6 +225,9 @@ fun NeuroBotAppShell(viewModel: BotViewModel) {
                                 telemetry = liveTelemetry,
                                 statusBanner = screenshotState.statusBanner,
                                 onSelectBotMode = { viewModel.setBotMode(it) },
+                                onSelectSeatSide = { viewModel.setBotSeatSide(it) },
+                                onSelectPreferredSuit = { viewModel.setPreferredSuit(it) },
+                                onToggleWatchHuman = { viewModel.setWatchHumanLearn(it) },
                                 onFeedbackReward = { viewModel.giveManualLiveFeedback(it) },
                                 onTriggerReplay = { viewModel.triggerExperienceReplay() },
                                 onDismissBanner = { viewModel.clearStatusBanner() }

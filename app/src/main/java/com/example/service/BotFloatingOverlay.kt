@@ -23,9 +23,9 @@ import kotlin.math.abs
 
 /**
  * Compact expandable floating bot controller attached via TYPE_ACCESSIBILITY_OVERLAY
- * (requires zero SYSTEM_ALERT_WINDOW permission). Starts as a small draggable 50dp orb
- * with live Force % and expands on tap into a control card with ON/OFF, Force meter,
- * Force presets, and ball/turn telemetry.
+ * (requires zero SYSTEM_ALERT_WINDOW permission). Starts as a small draggable 52dp orb
+ * showing Turn/Force status and expands on tap into a control card with Turn/Seat Lock,
+ * Suit Lock (Auto/Solids/Stripes), Shot Force meter + presets, and ON/Shoot/OFF buttons.
  */
 class BotFloatingOverlay(private val context: Context) {
 
@@ -46,11 +46,21 @@ class BotFloatingOverlay(private val context: Context) {
 
     // Expanded panel views
     private var headerStatusText: TextView? = null
+    private var turnSuitStatusText: TextView? = null
     private var visionStatusText: TextView? = null
     private var forcePercentText: TextView? = null
     private var forceProgressBar: ProgressBar? = null
     private var lastForceDetailText: TextView? = null
     private var onOffButton: TextView? = null
+
+    private var seatLeftBtn: TextView? = null
+    private var seatRightBtn: TextView? = null
+    private var seatWatchBtn: TextView? = null
+
+    private var suitAutoBtn: TextView? = null
+    private var suitSolidsBtn: TextView? = null
+    private var suitStripesBtn: TextView? = null
+
     private var presetAutoBtn: TextView? = null
     private var presetLowBtn: TextView? = null
     private var presetMedBtn: TextView? = null
@@ -118,7 +128,6 @@ class BotFloatingOverlay(private val context: Context) {
             layoutParams = params
             isAttached = true
         } catch (_: Exception) {
-            // Ignore if Accessibility window token is not yet ready
         }
     }
 
@@ -156,7 +165,7 @@ class BotFloatingOverlay(private val context: Context) {
             gravity = Gravity.CENTER
             background = bg
             elevation = dp(6).toFloat()
-            val sizePx = dp(50)
+            val sizePx = dp(52)
             layoutParams = FrameLayout.LayoutParams(sizePx, sizePx)
             setPadding(dp(4), dp(4), dp(4), dp(4))
         }
@@ -189,7 +198,7 @@ class BotFloatingOverlay(private val context: Context) {
         val cardBg = GradientDrawable().apply {
             shape = GradientDrawable.RECTANGLE
             cornerRadius = dp(16).toFloat()
-            setColor(Color.parseColor("#ED0B1220"))
+            setColor(Color.parseColor("#EE0B1220"))
             setStroke(dp(1) + 1, Color.parseColor("#38BDF8"))
         }
 
@@ -197,7 +206,7 @@ class BotFloatingOverlay(private val context: Context) {
             orientation = LinearLayout.VERTICAL
             background = cardBg
             elevation = dp(8).toFloat()
-            layoutParams = FrameLayout.LayoutParams(dp(248), FrameLayout.LayoutParams.WRAP_CONTENT)
+            layoutParams = FrameLayout.LayoutParams(dp(264), FrameLayout.LayoutParams.WRAP_CONTENT)
             setPadding(dp(12), dp(10), dp(12), dp(12))
         }
 
@@ -205,7 +214,7 @@ class BotFloatingOverlay(private val context: Context) {
         val headerRow = LinearLayout(context).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 0, 0, dp(6))
+            setPadding(0, 0, 0, dp(4))
         }
 
         val titleTxt = TextView(context).apply {
@@ -232,15 +241,58 @@ class BotFloatingOverlay(private val context: Context) {
         attachDragAndTapListener(headerRow, onTap = { toggleExpanded() })
         card.addView(headerRow)
 
-        // Vision & Turn line
-        val visionTxt = TextView(context).apply {
-            text = "Cue: Scanning... | Turn: WAIT"
-            setTextColor(Color.parseColor("#CBD5E1"))
+        // Turn & Suit Indicator Badge
+        val turnSuitTxt = TextView(context).apply {
+            text = "WAIT • Suit: OPEN | Human: 0"
+            setTextColor(Color.parseColor("#38BDF8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(0, 0, 0, dp(3))
+        }
+        turnSuitStatusText = turnSuitTxt
+        card.addView(turnSuitTxt)
+
+        // Vision summary line
+        val visionTxt = TextView(context).apply {
+            text = "Cue: Scanning... | Pkt: -"
+            setTextColor(Color.parseColor("#CBD5E1"))
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
             setPadding(0, 0, 0, dp(6))
         }
         visionStatusText = visionTxt
         card.addView(visionTxt)
+
+        // Seat Selection Row: P1 Left | P2 Right | Watch Only
+        val seatRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(5))
+        }
+        val sLeft = makeSeatChip("Bot P1(L)", "LEFT").also { seatLeftBtn = it }
+        val sRight = makeSeatChip("Bot P2(R)", "RIGHT").also { seatRightBtn = it }
+        val sWatch = makeSeatChip("Watch", "WATCH").also { seatWatchBtn = it }
+        seatRow.addView(sLeft)
+        seatRow.addView(spaceX(4))
+        seatRow.addView(sRight)
+        seatRow.addView(spaceX(4))
+        seatRow.addView(sWatch)
+        card.addView(seatRow)
+
+        // Suit Selection Row: Auto | Solid | Stripe
+        val suitRow = LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(7))
+        }
+        val suAuto = makeSuitChip("Suit:Auto", null).also { suitAutoBtn = it }
+        val suSolid = makeSuitChip("Solids", "SOLIDS").also { suitSolidsBtn = it }
+        val suStripe = makeSuitChip("Stripes", "STRIPES").also { suitStripesBtn = it }
+        suitRow.addView(suAuto)
+        suitRow.addView(spaceX(4))
+        suitRow.addView(suSolid)
+        suitRow.addView(spaceX(4))
+        suitRow.addView(suStripe)
+        card.addView(suitRow)
 
         // Force / Power Meter Section
         val forceHeaderRow = LinearLayout(context).apply {
@@ -257,7 +309,7 @@ class BotFloatingOverlay(private val context: Context) {
         val forceVal = TextView(context).apply {
             text = "0%"
             setTextColor(Color.WHITE)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             typeface = Typeface.MONOSPACE
         }
         forcePercentText = forceVal
@@ -270,20 +322,20 @@ class BotFloatingOverlay(private val context: Context) {
             progress = 60
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dp(8)
+                dp(7)
             ).apply {
-                topMargin = dp(4)
-                bottomMargin = dp(4)
+                topMargin = dp(3)
+                bottomMargin = dp(3)
             }
         }
         forceProgressBar = bar
         card.addView(bar)
 
         val lastForceTxt = TextView(context).apply {
-            text = "Last Shot: --% | Cut: --° | Friction: 0.52"
+            text = "Last: --% • Cut: --° • Fric: 0.52"
             setTextColor(Color.parseColor("#94A3B8"))
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-            setPadding(0, 0, 0, dp(8))
+            setPadding(0, 0, 0, dp(7))
         }
         lastForceDetailText = lastForceTxt
         card.addView(lastForceTxt)
@@ -363,6 +415,38 @@ class BotFloatingOverlay(private val context: Context) {
         return card
     }
 
+    private fun makeSeatChip(label: String, seat: String): TextView {
+        return makePillButton(
+            label = label,
+            bgColor = "#1E293B",
+            textColor = "#CBD5E1",
+            padH = 5,
+            padV = 4
+        ).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                BotServiceBridge.setManualSeatSideOverride(seat)
+            }
+        }
+    }
+
+    private fun makeSuitChip(label: String, suit: String?): TextView {
+        return makePillButton(
+            label = label,
+            bgColor = "#1E293B",
+            textColor = "#CBD5E1",
+            padH = 5,
+            padV = 4
+        ).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            setOnClickListener {
+                BotServiceBridge.setManualSuitOverride(suit)
+            }
+        }
+    }
+
     private fun makePresetChip(label: String, forceValue: Float?): TextView {
         return makePillButton(
             label = label,
@@ -403,23 +487,44 @@ class BotFloatingOverlay(private val context: Context) {
 
     private fun bindTelemetry(t: LiveBotTelemetry) {
         val isPaused = t.isLiveBotPaused
-        val accentColor = if (isPaused) Color.parseColor("#F59E0B") else Color.parseColor("#10B981")
+        val seat = t.manualSeatSideOverride ?: "LEFT"
+        val isWatchingHuman = t.turnOwnerLabel.contains("HUMAN", ignoreCase = true) || seat == "WATCH"
+
+        val accentColor = when {
+            isPaused -> Color.parseColor("#F59E0B")
+            t.isMyTurnDetected -> Color.parseColor("#10B981")
+            isWatchingHuman -> Color.parseColor("#38BDF8")
+            else -> Color.parseColor("#10B981")
+        }
 
         miniBgDrawable?.setStroke(dp(2), accentColor)
-        miniStatusDot?.text = if (isPaused) "OFF" else "ON"
+        miniStatusDot?.text = when {
+            isPaused -> "OFF"
+            t.isMyTurnDetected -> "BOT"
+            isWatchingHuman -> "OBS"
+            else -> "ON"
+        }
         miniStatusDot?.setTextColor(accentColor)
 
         val displayForce = t.manualPowerOverride ?: t.plannedPowerFraction.takeIf { it > 0.01f } ?: t.lastShotPowerFraction
         val forcePct = (displayForce * 100f).toInt().coerceIn(0, 100)
         miniForceText?.text = if (forcePct > 0) "${forcePct}%" else "AUTO"
 
-        headerStatusText?.text = if (isPaused) "NeuroBot • PAUSED" else "NeuroBot • ACTIVE"
+        headerStatusText?.text = if (isPaused) "NeuroBot • PAUSED" else "NeuroBot • LIVE"
         headerStatusText?.setTextColor(accentColor)
 
-        val turnLabel = if (t.isMyTurnDetected) "YOUR TURN" else "WAIT"
+        turnSuitStatusText?.text = "${t.turnOwnerLabel} • Suit:${t.effectiveSuitLabel} • Human:${t.humanShotsObserved}"
+        turnSuitStatusText?.setTextColor(
+            when {
+                t.isMyTurnDetected -> Color.parseColor("#10B981")
+                isWatchingHuman -> Color.parseColor("#38BDF8")
+                else -> Color.parseColor("#F59E0B")
+            }
+        )
+
         val cueMark = if (t.isCueBallDetected) "Cue✓" else "Cue✗"
         val pocketStr = t.plannedPocketId ?: "-"
-        visionStatusText?.text = "${t.captureSizeLabel} • $turnLabel | $cueMark | Balls:${t.detectedTargetBallsCount} | Pkt:$pocketStr"
+        visionStatusText?.text = "${t.captureSizeLabel} • $cueMark | Targets:${t.detectedTargetBallsCount} | Pkt:$pocketStr"
 
         val modeSuffix = if (t.manualPowerOverride != null) "Manual" else "AI Auto"
         forcePercentText?.text = "${forcePct}% ($modeSuffix)"
@@ -433,15 +538,24 @@ class BotFloatingOverlay(private val context: Context) {
         val btnBg = onOffButton?.background as? GradientDrawable
         btnBg?.setColor(Color.parseColor(if (isPaused) "#10B981" else "#F59E0B"))
 
-        highlightPreset(presetAutoBtn, t.manualPowerOverride == null)
-        highlightPreset(presetLowBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.35f) < 0.05f)
-        highlightPreset(presetMedBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.65f) < 0.05f)
-        highlightPreset(presetHighBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.90f) < 0.05f)
+        highlightChip(seatLeftBtn, seat == "LEFT", "#10B981")
+        highlightChip(seatRightBtn, seat == "RIGHT", "#10B981")
+        highlightChip(seatWatchBtn, seat == "WATCH", "#38BDF8")
+
+        val suitOverride = t.manualSuitOverride
+        highlightChip(suitAutoBtn, suitOverride == null || suitOverride == "AUTO", "#0EA5E9")
+        highlightChip(suitSolidsBtn, suitOverride == "SOLIDS", "#0EA5E9")
+        highlightChip(suitStripesBtn, suitOverride == "STRIPES", "#0EA5E9")
+
+        highlightChip(presetAutoBtn, t.manualPowerOverride == null, "#0EA5E9")
+        highlightChip(presetLowBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.35f) < 0.05f, "#0EA5E9")
+        highlightChip(presetMedBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.65f) < 0.05f, "#0EA5E9")
+        highlightChip(presetHighBtn, t.manualPowerOverride != null && abs(t.manualPowerOverride - 0.90f) < 0.05f, "#0EA5E9")
     }
 
-    private fun highlightPreset(btn: TextView?, selected: Boolean) {
+    private fun highlightChip(btn: TextView?, selected: Boolean, selectedColor: String) {
         val bg = btn?.background as? GradientDrawable ?: return
-        bg.setColor(Color.parseColor(if (selected) "#0EA5E9" else "#1E293B"))
+        bg.setColor(Color.parseColor(if (selected) selectedColor else "#1E293B"))
         btn.setTextColor(Color.parseColor(if (selected) "#070B14" else "#CBD5E1"))
     }
 

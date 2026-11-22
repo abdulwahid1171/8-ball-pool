@@ -49,6 +49,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -83,6 +84,9 @@ fun BotControlScreen(
     telemetry: LiveBotTelemetry,
     statusBanner: String?,
     onSelectBotMode: (String) -> Unit,
+    onSelectSeatSide: (String) -> Unit,
+    onSelectPreferredSuit: (String) -> Unit,
+    onToggleWatchHuman: (Boolean) -> Unit,
     onFeedbackReward: (Float) -> Unit,
     onTriggerReplay: () -> Unit,
     onDismissBanner: () -> Unit,
@@ -223,6 +227,114 @@ fun BotControlScreen(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
+                }
+            }
+        }
+
+        // Turn Ownership, Suit Recognition & Watch-Human Learning Card (POOL_AIM)
+        if (isPoolMode) {
+            item {
+                val activeSeat = (telemetry.manualSeatSideOverride ?: profile?.botSeatSide ?: "LEFT").uppercase()
+                val activeSuit = (telemetry.manualSuitOverride ?: profile?.preferredSuit ?: "AUTO").uppercase()
+                val watchHuman = profile?.watchHumanLearn ?: true
+                val humanShots = maxOf(profile?.humanShotsObserved ?: 0, telemetry.humanShotsObserved)
+
+                Card(
+                    shape = MaterialTheme.shapes.medium,
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isUrdu) "اپنی باری، بالز (Solids/Stripes) اور ہیومن لرننگ" else "Turn Control, Ball Suit & Human Learning",
+                                style = MaterialTheme.typography.titleSmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Text(
+                                text = if (isUrdu) "سیکھے شاٹس: $humanShots" else "Observed: $humanShots",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanElectric
+                            )
+                        }
+
+                        Text(
+                            text = if (isUrdu) {
+                                "بوٹ صرف اپنی منتخب باری پر کھیلے گا۔ مخالف/ہیومن کی باری پر ہاتھ نہیں لگائے گا بلکہ دیکھ کر سیکھے گا:"
+                            } else {
+                                "Bot plays ONLY its selected turn and stays hands-off on Human turns while passively learning physics & shots:"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "LEFT" to (if (isUrdu) "Bot بایاں (P1)" else "Bot P1 (L)"),
+                                "RIGHT" to (if (isUrdu) "Bot دایاں (P2)" else "Bot P2 (R)"),
+                                "WATCH" to (if (isUrdu) "صرف دیکھے" else "Watch Only")
+                            ).forEach { (seatCode, label) ->
+                                FilterChip(
+                                    selected = activeSeat == seatCode,
+                                    onClick = { onSelectSeatSide(seatCode) },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("chip_seat_${seatCode.lowercase()}")
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            listOf(
+                                "AUTO" to (if (isUrdu) "Auto (HUD)" else "Auto (HUD)"),
+                                "SOLIDS" to (if (isUrdu) "Solids (1-7)" else "Solids (1-7)"),
+                                "STRIPES" to (if (isUrdu) "Stripes (9-15)" else "Stripes (9-15)")
+                            ).forEach { (suitCode, label) ->
+                                FilterChip(
+                                    selected = activeSuit == suitCode,
+                                    onClick = { onSelectPreferredSuit(suitCode) },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall, maxLines = 1) },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .testTag("chip_suit_${suitCode.lowercase()}")
+                                )
+                            }
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = if (isUrdu) {
+                                    "ہیومن شاٹس دیکھ کر خودکار ٹریننگ کریں"
+                                } else {
+                                    "Learn in real-time when Human plays"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                modifier = Modifier.weight(1f)
+                            )
+                            Switch(
+                                checked = watchHuman,
+                                onCheckedChange = onToggleWatchHuman,
+                                modifier = Modifier.testTag("switch_watch_human")
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -539,9 +651,14 @@ fun BotControlScreen(
                         )
                         if (isPoolMode) {
                             Text(
-                                text = if (telemetry.isMyTurnDetected) "Turn: YOUR TURN" else "Turn: Waiting...",
+                                text = "Turn: ${telemetry.turnOwnerLabel}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = if (telemetry.isMyTurnDetected) EmeraldNeon else AmberPulse
+                            )
+                            Text(
+                                text = "Suit: ${telemetry.effectiveSuitLabel} (HUD: ${telemetry.detectedSuitLabel}) • Learned Human: ${telemetry.humanShotsObserved}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = CyanElectric
                             )
                             Text(
                                 text = "Cue: ${if (telemetry.isCueBallDetected) "OK" else "Scan"} • Targets: ${telemetry.detectedTargetBallsCount} • Pkt: ${telemetry.plannedPocketId ?: "-"}",

@@ -24,6 +24,9 @@ data class LiveBotTelemetry(
     val liveStepCount: Int = 0,
     val liveEpisodeReward: Float = 0f,
     val isMyTurnDetected: Boolean = false,
+    val turnOwnerLabel: String = "WAIT",
+    val detectedSuitLabel: String = "OPEN",
+    val effectiveSuitLabel: String = "OPEN",
     val detectedTargetBallsCount: Int = 0,
     val isCueBallDetected: Boolean = false,
     val poolAnalysisSummary: String = "Waiting for external game screen...",
@@ -37,6 +40,9 @@ data class LiveBotTelemetry(
     val lastShotPowerFraction: Float = 0f,
     val estimatedFriction: Float = 0.52f,
     val manualPowerOverride: Float? = null,
+    val manualSeatSideOverride: String? = null, // null | "LEFT" | "RIGHT" | "WATCH"
+    val manualSuitOverride: String? = null,     // null | "AUTO" | "SOLIDS" | "STRIPES"
+    val humanShotsObserved: Int = 0,
     val liveLogLines: List<String> = emptyList()
 )
 
@@ -76,6 +82,22 @@ object BotServiceBridge {
         appendLog("Shot Force set to $label")
     }
 
+    fun setManualSeatSideOverride(seat: String?) {
+        val normalized = seat?.uppercase()?.takeIf { it in listOf("LEFT", "RIGHT", "WATCH") }
+        _telemetry.update { it.copy(manualSeatSideOverride = normalized) }
+        appendLog("Bot Seat set to ${normalized ?: "PROFILE"}")
+    }
+
+    fun setManualSuitOverride(suit: String?) {
+        val normalized = suit?.uppercase()?.takeIf { it in listOf("AUTO", "SOLIDS", "STRIPES") }
+        _telemetry.update { it.copy(manualSuitOverride = normalized) }
+        appendLog("Suit Lock set to ${normalized ?: "AUTO"}")
+    }
+
+    fun setHumanShotsObserved(count: Int) {
+        _telemetry.update { it.copy(humanShotsObserved = count) }
+    }
+
     fun updateForegroundUiContext(
         packageName: String,
         clickableNodes: Int,
@@ -102,13 +124,19 @@ object BotServiceBridge {
         pocketId: String?,
         cutAngleDeg: Float = 0f,
         plannedPowerFraction: Float = 0f,
-        summary: String
+        summary: String,
+        turnOwnerLabel: String = if (isMyTurn) "BOT TURN" else "WAIT",
+        detectedSuitLabel: String = "OPEN",
+        effectiveSuitLabel: String = "OPEN"
     ) {
         _telemetry.update {
             it.copy(
                 latestVisionGrid = visionGrid,
                 latestStateHash = stateHash,
                 isMyTurnDetected = isMyTurn,
+                turnOwnerLabel = turnOwnerLabel,
+                detectedSuitLabel = detectedSuitLabel,
+                effectiveSuitLabel = effectiveSuitLabel,
                 detectedTargetBallsCount = targetsCount,
                 isCueBallDetected = cueX != null && cueY != null,
                 cueBallX = cueX,

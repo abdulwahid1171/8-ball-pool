@@ -12,11 +12,18 @@ import kotlin.math.sin
 
 enum class DetectedBallKind { CUE, TARGET, EIGHT_BALL }
 
+enum class BallSuit { UNKNOWN, SOLID, STRIPE, EIGHT_BALL }
+
+enum class AssignedSuit { OPEN, SOLIDS, STRIPES, EIGHT_BALL }
+
+enum class TurnOwner { LEFT_PLAYER, RIGHT_PLAYER, NONE }
+
 data class DetectedBall(
     val normX: Float, // normalized 0..1 across full screen
     val normY: Float, // normalized 0..1 across full screen
     val kind: DetectedBallKind,
-    val sampleColor: Int
+    val sampleColor: Int,
+    val suit: BallSuit = BallSuit.UNKNOWN
 )
 
 data class PoolPocket(
@@ -40,8 +47,14 @@ data class PlannedPoolShot(
 
 data class PoolFrameAnalysis(
     val isMyTurn: Boolean,
+    val turnOwner: TurnOwner,
+    val leftGreenRatio: Float,
+    val rightGreenRatio: Float,
+    val powerBarVisible: Boolean,
     val greenTurnRatio: Float,
     val pottedOccupiedRatio: Float,
+    val detectedSuit: AssignedSuit,
+    val effectiveSuit: AssignedSuit,
     val cueBall: DetectedBall?,
     val targetBalls: List<DetectedBall>,
     val eightBall: DetectedBall?,
@@ -49,16 +62,30 @@ data class PoolFrameAnalysis(
     val plannedShot: PlannedPoolShot?,
     val visionGrid: List<Float>,
     val summary: String
-)
+) {
+    val allTableTargets: List<DetectedBall>
+        get() = targetBalls + listOfNotNull(eightBall)
+}
 
 /**
  * Computer-vision analyzer for Pool / Billiards mobile game screenshots and
- * live MediaProjection frames. Reads the table felt, detects Cue Ball, Colored
- * Target Balls, 8-Ball, Green Turn Border, and Potted Ball Indicator Bar.
+ * live MediaProjection frames. Reads the table felt, detects Cue Ball, Solids vs Stripes
+ * Target Balls, 8-Ball, Left vs Right Player Turn Border, and Top HUD Ball Racks.
  */
 object PoolVisionAnalyzer {
 
-    fun analyze(bitmap: Bitmap, profile: TrainingProfileEntity): PoolFrameAnalysis {
+    private data class RackScanResult(
+        val occupiedSlots: Int,
+        val isStripesScore: Float,
+        val occupiedRatio: Float
+    )
+
+    fun analyze(
+        bitmap: Bitmap,
+        profile: TrainingProfileEntity,
+        seatOverride: String? = null,
+        suitOverride: String? = null
+    ): PoolFrameAnalysis {
         val w = bitmap.width.coerceAtLeast(1)
         val h = bitmap.height.coerceAtLeast(1)
 
@@ -76,21 +103,57 @@ object PoolVisionAnalyzer {
             PoolPocket("BR", tRight - 0.030f, tBottom - 0.040f)
         )
 
-        // 1. Check green turn glow around player avatar vs opponent avatar + left power bar presence
+        // 1. Strict Left vs Right Player Turn Ownership (no power-bar false-positive override)
         val leftGreenRatio = measureGreenBorderRatio(bitmap, profile.turnBoxX, profile.turnBoxY)
         val opponentTurnX = (1.0f - profile.turnBoxX).coerceIn(0.50f, 0.85f)
         val rightGreenRatio = measureGreenBorderRatio(bitmap, opponentTurnX, profile.turnBoxY)
         val powerBarVisible = measurePowerBarVisible(bitmap, profile.powerBarX)
-        val isMyTurn = (leftGreenRatio >= 0.025f && leftGreenRatio >= rightGreenRatio * 1.25f) ||
-            (powerBarVisible && rightGreenRatio < 0.045f)
 
-        // 2. Measure potted balls indicator bar saturation/brightness
-        val pottedRatio = measurePottedSlotsRatio(
-            bitmap,
-            profile.pottedBarLeft,
-            profile.pottedBarRight,
-            profile.pottedBarY
+        val turnOwner = when {
+            leftGreenRatio >= 0.022f && leftGreenRatio >= rightGreenRatio * 1.28f -> TurnOwner.LEFT_PLAYER
+            rightGreenRatio >= 0.022f && rightGreenRatio >= leftGreenRatio * 1.28f -> TurnOwner.RIGHT_PLAYER
+            else -> TurnOwner.NONE
+        }
+
+        val effectiveSeat = (seatOverride ?: profile.botSeatSide).uppercase()
+        val isMyTurn = when (effectiveSeat) {
+            "LEFT" -> turnOwner == TurnOwner.LEFT_PLAYER
+            "RIGHT" -> turnOwner == TurnOwner.RIGHT_PLAYER
+            else -> false // WATCH mode never takes turns
+        }
+
+        // 2. Scan Left & Right Top HUD Racks to classify assigned suit (OPEN / SOLIDS / STRIPES / EIGHT_BALL)
+        val leftRack = scanHudRack(
+            bitmap = bitmap,
+            leftX = profile.pottedBarLeft,
+            rightX = profile.pottedBarRight,
+            centerY = profile.pottedBarY
         )
+        val oppLeftX = (1.0f - profile.pottedBarRight).coerceIn(0.55f, 0.72f)
+        val oppRightX = (1.0f - profile.pottedBarLeft).coerceIn(0.70f, 0.90f)
+        val rightRack = scanHudRack(
+            bitmap = bitmap,
+            leftX = oppLeftX,
+            rightX = oppRightX,
+            centerY = profile.pottedBarY
+        )
+
+        val botRack = if (effectiveSeat == "RIGHT") rightRack else leftRack
+        val oppRack = if (effectiveSeat == "RIGHT") leftRack else rightRack
+        val detectedSuit = inferAssignedSuit(botRack, oppRack)
+
+        val suitChoice = (suitOverride ?: profile.preferredSuit).uppercase()
+        val effectiveSuit = when (suitChoice) {
+            "SOLIDS" -> if (detectedSuit == AssignedSuit.EIGHT_BALL) AssignedSuit.EIGHT_BALL else AssignedSuit.SOLIDS
+            "STRIPES" -> if (detectedSuit == AssignedSuit.EIGHT_BALL) AssignedSuit.EIGHT_BALL else AssignedSuit.STRIPES
+            else -> detectedSuit
+        }
+
+        val greenTurnRatio = when (effectiveSeat) {
+            "RIGHT" -> rightGreenRatio
+            else -> leftGreenRatio
+        }
+        val pottedRatio = botRack.occupiedRatio
 
         // Inner felt boundaries (exclude wooden rails & outer pockets)
         val fLeft = (tLeft + 0.032f).coerceAtMost(tRight - 0.20f)
@@ -101,12 +164,11 @@ object PoolVisionAnalyzer {
         // 3. Estimate table felt color using median of 9 interior table points
         val feltHsv = estimateFeltColorHsv(bitmap, fLeft, fTop, fRight, fBottom)
 
-        // 4. Scan interior felt on a 96x54 grid (handles 20:9 / 16:9 mobile screens accurately)
+        // 4. Scan interior felt on a 96x54 grid (handles 20:9 / 16:9 mobile screens cleanly)
         val cols = 96
         val rows = 54
         val totalCells = cols * rows
         val cellColors = IntArray(totalCells)
-        val cellHue = FloatArray(totalCells)
         val cellSat = FloatArray(totalCells)
         val cellLum = FloatArray(totalCells)
         val isWhiteCore = BooleanArray(totalCells)
@@ -123,11 +185,9 @@ object PoolVisionAnalyzer {
                 Color.colorToHSV(pixel, hsv)
                 val idx = r * cols + c
                 cellColors[idx] = pixel
-                cellHue[idx] = hsv[0]
                 cellSat[idx] = hsv[1]
                 cellLum[idx] = hsv[2]
 
-                // Skip pocket dark circles at corners/mid-rails
                 val nearPocket = pockets.any { hypot(nx - it.normX, ny - it.normY) < 0.036f }
                 if (nearPocket) continue
 
@@ -135,17 +195,15 @@ object PoolVisionAnalyzer {
                 val valDiff = abs(hsv[2] - feltHsv[2])
                 val satDiff = abs(hsv[1] - feltHsv[1])
 
-                val isWhite = hsv[2] > 0.72f && hsv[1] < 0.28f
+                val isWhite = hsv[2] > 0.70f && hsv[1] < 0.28f
                 isWhiteCore[idx] = isWhite
 
-                // Differ significantly from table felt (saturated ball, bright stripe/white, or very dark 8-ball)
                 val differsFromFelt = hueDiff > 22f || satDiff > 0.24f || valDiff > 0.24f
                 isBallCell[idx] = differsFromFelt
             }
         }
 
         // 5. Dedicated Cue-Ball sliding 3x3 white-density kernel
-        // Immune to wooden cue stick shafts or white aiming lines touching the cue ball!
         val cueBall = detectCueBallByWhiteKernel(
             cols = cols,
             rows = rows,
@@ -159,7 +217,7 @@ object PoolVisionAnalyzer {
             fBottom = fBottom
         )
 
-        // Mask out a small radius around the detected cue ball so BFS clusters focus on colored targets & 8-ball
+        // Mask out ONLY the cue ball before clustering colored, striped, and 8 balls
         val visited = BooleanArray(totalCells)
         if (cueBall != null) {
             for (r in 0 until rows) {
@@ -173,7 +231,7 @@ object PoolVisionAnalyzer {
             }
         }
 
-        // Suppress isolated thin 1px aiming/stick lines (cells without neighboring thick support)
+        // Preserve both vivid colored regions AND bright white stripe bands so striped balls form single clusters
         val filteredBallCell = BooleanArray(totalCells)
         for (r in 1 until rows - 1) {
             for (c in 1 until cols - 1) {
@@ -187,10 +245,9 @@ object PoolVisionAnalyzer {
                         }
                     }
                 }
-                // Balls are solid round blobs (at least 3 of 8 neighbors), whereas cue stick lines have 1-2
-                // Also prefer higher color saturation or very dark 8-ball over tan cue stick wood
-                val vividOrDark = cellSat[idx] > 0.34f || cellLum[idx] < 0.22f || cellLum[idx] > 0.78f
-                if (neighbors >= 3 && vividOrDark) {
+                val isStripeWhite = cellLum[idx] > 0.58f && cellSat[idx] < 0.28f
+                val vividOrDarkOrStripe = cellSat[idx] > 0.34f || cellLum[idx] < 0.22f || isStripeWhite
+                if (neighbors >= 3 && vividOrDarkOrStripe) {
                     filteredBallCell[idx] = true
                 }
             }
@@ -212,6 +269,8 @@ object PoolVisionAnalyzer {
             var maxLum = 0f
             var avgLum = 0f
             var avgSat = 0f
+            var whiteCells = 0
+            var darkCells = 0
             var repColor = cellColors[startIdx]
             var minR = rows
             var maxR = 0
@@ -225,10 +284,14 @@ object PoolVisionAnalyzer {
                 sumR += cr
                 sumC += cc
                 count++
-                avgLum += cellLum[curr]
-                avgSat += cellSat[curr]
-                if (cellSat[curr] > 0.35f && cellLum[curr] > maxLum) {
-                    maxLum = cellLum[curr]
+                val lum = cellLum[curr]
+                val sat = cellSat[curr]
+                avgLum += lum
+                avgSat += sat
+                if (lum > 0.58f && sat < 0.28f) whiteCells++
+                if (lum < 0.24f && sat < 0.45f) darkCells++
+                if (sat > 0.35f && lum > maxLum) {
+                    maxLum = lum
                     repColor = cellColors[curr]
                 }
                 if (cr < minR) minR = cr
@@ -254,57 +317,190 @@ object PoolVisionAnalyzer {
             val spanR = maxR - minR + 1
             val spanC = maxC - minC + 1
             val aspectOk = maxOf(spanR, spanC).toFloat() / minOf(spanR, spanC).coerceAtLeast(1) < 3.0f
-            if (count in 3..48 && spanR <= 9 && spanC <= 9 && aspectOk) {
+            if (count in 3..52 && spanR <= 9 && spanC <= 9 && aspectOk) {
                 val centerCol = sumC / count
                 val centerRow = sumR / count
                 val normX = fLeft + ((centerCol + 0.5f) / cols) * (fRight - fLeft)
                 val normY = fTop + ((centerRow + 0.5f) / rows) * (fBottom - fTop)
 
-                // Deduplicate close clusters (e.g. half of striped ball)
                 val tooCloseToCue = cueBall != null && hypot(normX - cueBall.normX, normY - cueBall.normY) < 0.025f
                 val tooCloseToExisting = detectedTargets.any { hypot(normX - it.normX, normY - it.normY) < 0.024f }
                 if (!tooCloseToCue && !tooCloseToExisting) {
                     val mLum = avgLum / count
                     val mSat = avgSat / count
-                    val kind = when {
-                        mLum < 0.23f && mSat < 0.45f -> DetectedBallKind.EIGHT_BALL
-                        else -> DetectedBallKind.TARGET
+                    val whiteFrac = whiteCells.toFloat() / count
+                    val darkFrac = darkCells.toFloat() / count
+
+                    val (kind, suit) = when {
+                        darkFrac >= 0.48f || (mLum < 0.23f && mSat < 0.45f && whiteCells == 0) ->
+                            DetectedBallKind.EIGHT_BALL to BallSuit.EIGHT_BALL
+                        whiteFrac >= 0.22f || (whiteCells >= 2 && whiteFrac >= 0.16f && mSat < 0.72f) ->
+                            DetectedBallKind.TARGET to BallSuit.STRIPE
+                        else ->
+                            DetectedBallKind.TARGET to BallSuit.SOLID
                     }
-                    detectedTargets.add(DetectedBall(normX, normY, kind, repColor))
+                    detectedTargets.add(DetectedBall(normX, normY, kind, repColor, suit))
                 }
             }
         }
 
         val eightBall = detectedTargets.firstOrNull { it.kind == DetectedBallKind.EIGHT_BALL }
-        val targets = detectedTargets.filter { it.kind == DetectedBallKind.TARGET }
-        val resolvedTargets = targets.ifEmpty { listOfNotNull(eightBall) }
+        val allColoredTargets = detectedTargets.filter { it.kind == DetectedBallKind.TARGET }
+        val legalTargets = filterLegalTargets(
+            effectiveSuit = effectiveSuit,
+            targets = allColoredTargets,
+            eightBall = eightBall
+        )
+        val obstacleBalls = allColoredTargets + listOfNotNull(eightBall)
 
-        val planned = computeBestShot(cueBall, resolvedTargets, pockets, fLeft, fTop, fRight, fBottom)
+        val planned = computeBestShot(
+            cue = cueBall,
+            targets = legalTargets,
+            pockets = pockets,
+            fLeft = fLeft,
+            fTop = fTop,
+            fRight = fRight,
+            fBottom = fBottom,
+            allObstacles = obstacleBalls
+        )
 
-        // Build 6x6 vision radar grid from table cells
-        val visionGrid = build6x6VisionGrid(bitmap, fLeft, fTop, fRight, fBottom, cueBall, targets)
+        val visionGrid = build6x6VisionGrid(bitmap, fLeft, fTop, fRight, fBottom, cueBall, allColoredTargets)
+
+        val solidsCount = allColoredTargets.count { it.suit == BallSuit.SOLID }
+        val stripesCount = allColoredTargets.count { it.suit == BallSuit.STRIPE }
+        val turnTag = when {
+            effectiveSeat == "WATCH" -> "WATCH(${turnOwner.name.take(1)})"
+            isMyTurn -> "BOT TURN"
+            turnOwner != TurnOwner.NONE -> "HUMAN TURN"
+            else -> "ROLLING/WAIT"
+        }
 
         val summary = buildString {
-            append(if (isMyTurn) "YOUR TURN" else "WAIT TURN")
-            append(" | Cue: ")
-            append(if (cueBall != null) "(${(cueBall.normX * 100).toInt()}%,${(cueBall.normY * 100).toInt()}%)" else "N/A")
-            append(" | Targets: ${targets.size}")
+            append(turnTag)
+            append(" • ${effectiveSuit.name}")
+            append(" | Cue:${if (cueBall != null) "OK" else "N/A"}")
+            append(" | S:$solidsCount St:$stripesCount")
             if (planned != null) {
-                append(" | Cut ${planned.cutAngleDeg.toInt()}° -> ${planned.pocket.id}")
+                append(" | ${planned.targetBall.suit.name.take(3)}->${planned.pocket.id} (${planned.cutAngleDeg.toInt()}°)")
             }
         }
 
         return PoolFrameAnalysis(
             isMyTurn = isMyTurn,
-            greenTurnRatio = leftGreenRatio,
+            turnOwner = turnOwner,
+            leftGreenRatio = leftGreenRatio,
+            rightGreenRatio = rightGreenRatio,
+            powerBarVisible = powerBarVisible,
+            greenTurnRatio = greenTurnRatio,
             pottedOccupiedRatio = pottedRatio,
+            detectedSuit = detectedSuit,
+            effectiveSuit = effectiveSuit,
             cueBall = cueBall,
-            targetBalls = targets,
+            targetBalls = allColoredTargets,
             eightBall = eightBall,
             pockets = pockets,
             plannedShot = planned,
             visionGrid = visionGrid,
             summary = summary
+        )
+    }
+
+    fun filterLegalTargets(
+        effectiveSuit: AssignedSuit,
+        targets: List<DetectedBall>,
+        eightBall: DetectedBall?
+    ): List<DetectedBall> {
+        val solids = targets.filter { it.suit == BallSuit.SOLID }
+        val stripes = targets.filter { it.suit == BallSuit.STRIPE }
+        return when (effectiveSuit) {
+            AssignedSuit.SOLIDS -> {
+                solids.ifEmpty {
+                    // Only shoot 8-ball if no opponent stripes or solids remain unclear; avoid hitting enemy stripes!
+                    if (stripes.isEmpty()) listOfNotNull(eightBall) else emptyList()
+                }
+            }
+            AssignedSuit.STRIPES -> {
+                stripes.ifEmpty {
+                    if (solids.isEmpty()) listOfNotNull(eightBall) else emptyList()
+                }
+            }
+            AssignedSuit.EIGHT_BALL -> listOfNotNull(eightBall)
+            AssignedSuit.OPEN -> targets.ifEmpty { listOfNotNull(eightBall) }
+        }
+    }
+
+    private fun inferAssignedSuit(botRack: RackScanResult, oppRack: RackScanResult): AssignedSuit {
+        if (botRack.occupiedSlots == 0 && oppRack.occupiedSlots == 0) {
+            return AssignedSuit.OPEN
+        }
+        if (botRack.occupiedSlots == 0 && oppRack.occupiedSlots >= 1) {
+            return AssignedSuit.EIGHT_BALL
+        }
+        // Positive isStripesScore => stripes; negative => solids
+        val diff = botRack.isStripesScore - oppRack.isStripesScore
+        return when {
+            botRack.isStripesScore >= 0.35f || diff >= 0.25f -> AssignedSuit.STRIPES
+            botRack.isStripesScore <= -0.35f || diff <= -0.25f -> AssignedSuit.SOLIDS
+            botRack.isStripesScore >= 0f -> AssignedSuit.STRIPES
+            else -> AssignedSuit.SOLIDS
+        }
+    }
+
+    private fun scanHudRack(
+        bitmap: Bitmap,
+        leftX: Float,
+        rightX: Float,
+        centerY: Float
+    ): RackScanResult {
+        val w = bitmap.width
+        val h = bitmap.height
+        val hsv = FloatArray(3)
+        var occupied = 0
+        var stripeVotes = 0f
+
+        val slotStart = (leftX + 0.008f).coerceIn(0.05f, 0.90f)
+        val slotEnd = (rightX - 0.008f).coerceIn(slotStart + 0.05f, 0.95f)
+
+        for (slot in 0 until 7) {
+            val sx = slotStart + (slot / 6f) * (slotEnd - slotStart)
+            var vividPixels = 0
+            var outerWhitePixels = 0
+            var outerColorPixels = 0
+            var brightPixels = 0
+
+            for (dyIdx in -2..2) {
+                val dy = dyIdx * 0.0045f
+                val py = ((centerY + dy) * h).toInt().coerceIn(0, h - 1)
+                for (dxIdx in -2..2) {
+                    val dx = dxIdx * 0.0032f
+                    val px = ((sx + dx) * w).toInt().coerceIn(0, w - 1)
+                    Color.colorToHSV(bitmap.getPixel(px, py), hsv)
+                    val s = hsv[1]
+                    val v = hsv[2]
+                    if (v > 0.30f) brightPixels++
+                    if (s > 0.35f && v > 0.22f) vividPixels++
+                    if (abs(dyIdx) == 2) {
+                        if (s < 0.30f && v > 0.44f) outerWhitePixels++
+                        if (s > 0.38f && v > 0.20f) outerColorPixels++
+                    }
+                }
+            }
+
+            if (vividPixels >= 4 || brightPixels >= 6) {
+                occupied++
+                if (outerWhitePixels >= 2 && outerWhitePixels >= outerColorPixels) {
+                    stripeVotes += 1f
+                } else if (outerColorPixels > outerWhitePixels + 1) {
+                    stripeVotes -= 1f
+                }
+            }
+        }
+
+        val normScore = if (occupied > 0) stripeVotes / occupied else 0f
+        return RackScanResult(
+            occupiedSlots = occupied,
+            isStripesScore = normScore,
+            occupiedRatio = occupied / 7f
         )
     }
 
@@ -343,8 +539,6 @@ object PoolVisionAnalyzer {
                         }
                     }
                 }
-                // A solid white cue ball covers >= 5 cells of a 3x3 patch on 96x54 grid;
-                // thin white aiming guidelines cover only 2-3 cells along 1 line.
                 if (whiteNeighbors >= 4) {
                     val avgLum = lumSum / whiteNeighbors
                     val avgSat = satSum / whiteNeighbors
@@ -361,7 +555,6 @@ object PoolVisionAnalyzer {
 
         if (bestR < 0) return null
 
-        // Refine center over immediate 3x3 white pixels around peak
         var sumR = 0f
         var sumC = 0f
         var count = 0
@@ -380,7 +573,7 @@ object PoolVisionAnalyzer {
         val finalC = if (count > 0) sumC / count else bestC.toFloat()
         val normX = fLeft + ((finalC + 0.5f) / cols) * (fRight - fLeft)
         val normY = fTop + ((finalR + 0.5f) / rows) * (fBottom - fTop)
-        return DetectedBall(normX, normY, DetectedBallKind.CUE, bestColor)
+        return DetectedBall(normX, normY, DetectedBallKind.CUE, bestColor, BallSuit.UNKNOWN)
     }
 
     fun computeAimPointWithTrim(shot: PlannedPoolShot, angleTrimDeg: Float): Pair<Float, Float> {
@@ -393,14 +586,15 @@ object PoolVisionAnalyzer {
             (shot.cueBall.normY + ry).coerceIn(0.20f, 0.92f)
     }
 
-    private fun computeBestShot(
+    fun computeBestShot(
         cue: DetectedBall?,
         targets: List<DetectedBall>,
         pockets: List<PoolPocket>,
         fLeft: Float,
         fTop: Float,
         fRight: Float,
-        fBottom: Float
+        fBottom: Float,
+        allObstacles: List<DetectedBall> = targets
     ): PlannedPoolShot? {
         if (cue == null || targets.isEmpty()) return null
 
@@ -426,34 +620,72 @@ object PoolVisionAnalyzer {
 
                 if (cutAngleDeg > 68f) continue
 
-                val ghostX = target.normX - (tpDx / tpDist) * (ballRadiusNorm * 1.9f)
-                val ghostY = target.normY - (tpDy / tpDist) * (ballRadiusNorm * 1.9f)
+                val ghostX = (target.normX - (tpDx / tpDist) * (ballRadiusNorm * 1.9f)).coerceIn(fLeft, fRight)
+                val ghostY = (target.normY - (tpDy / tpDist) * (ballRadiusNorm * 1.9f)).coerceIn(fTop, fBottom)
+
+                // Penalize shots where cue->ghost or target->pocket passes directly through another ball (especially 8-ball)
+                var blockerPenalty = 0f
+                for (obs in allObstacles) {
+                    val isTargetItself = hypot(obs.normX - target.normX, obs.normY - target.normY) < 0.015f
+                    if (isTargetItself) continue
+                    val distCuePath = pointToSegmentDistance(
+                        obs.normX, obs.normY,
+                        cue.normX, cue.normY,
+                        ghostX, ghostY
+                    )
+                    val distTargetPath = pointToSegmentDistance(
+                        obs.normX, obs.normY,
+                        target.normX, target.normY,
+                        pocket.normX, pocket.normY
+                    )
+                    if (distCuePath < 0.026f || distTargetPath < 0.026f) {
+                        blockerPenalty += if (obs.kind == DetectedBallKind.EIGHT_BALL) 85f else 55f
+                    }
+                }
 
                 val totalDist = ctDist + tpDist
-                val geomScore = (90f - cutAngleDeg) * 1.4f - totalDist * 45f
+                val geomScore = (90f - cutAngleDeg) * 1.4f - totalDist * 45f - blockerPenalty
 
                 if (geomScore > bestScore) {
                     bestScore = geomScore
                     val angleBucket = (cutAngleDeg / 15f).toInt().coerceIn(0, 4)
                     val distBucket = (totalDist * 5f).toInt().coerceIn(0, 4)
-                    val basePower = (0.42f + totalDist * 0.55f + (cutAngleDeg / 180f) * 0.15f).coerceIn(0.35f, 0.94f)
+                    val basePower = (0.40f + totalDist * 0.50f + (cutAngleDeg / 180f) * 0.14f).coerceIn(0.32f, 0.90f)
                     val stateHash = "POOL_A${angleBucket}_D${distBucket}_${pocket.id}"
                     bestShot = PlannedPoolShot(
                         cueBall = cue,
                         targetBall = target,
                         pocket = pocket,
-                        aimPointX = ghostX.coerceIn(fLeft, fRight),
-                        aimPointY = ghostY.coerceIn(fTop, fBottom),
+                        aimPointX = ghostX,
+                        aimPointY = ghostY,
                         cutAngleDeg = cutAngleDeg,
                         totalDistance = totalDist,
                         basePowerFraction = basePower,
                         stateHash = stateHash,
-                        stateSummary = "Cut ${cutAngleDeg.toInt()}° | Dist ${"%.2f".format(totalDist)} -> ${pocket.id}"
+                        stateSummary = "Cut ${cutAngleDeg.toInt()}° | ${target.suit.name} | Dist ${"%.2f".format(totalDist)} -> ${pocket.id}"
                     )
                 }
             }
         }
         return bestShot
+    }
+
+    private fun pointToSegmentDistance(
+        px: Float,
+        py: Float,
+        ax: Float,
+        ay: Float,
+        bx: Float,
+        by: Float
+    ): Float {
+        val abx = bx - ax
+        val aby = by - ay
+        val lenSq = abx * abx + aby * aby
+        if (lenSq < 1e-6f) return hypot(px - ax, py - ay)
+        val t = (((px - ax) * abx + (py - ay) * aby) / lenSq).coerceIn(0.05f, 0.95f)
+        val projX = ax + t * abx
+        val projY = ay + t * aby
+        return hypot(px - projX, py - projY)
     }
 
     private fun estimateFeltColorHsv(
@@ -531,27 +763,6 @@ object PoolVisionAnalyzer {
             }
         }
         return brightWoodPixels >= 6
-    }
-
-    private fun measurePottedSlotsRatio(
-        bitmap: Bitmap,
-        leftX: Float,
-        rightX: Float,
-        centerY: Float
-    ): Float {
-        val w = bitmap.width
-        val h = bitmap.height
-        val py = (centerY * h).toInt().coerceIn(0, h - 1)
-        var bright = 0
-        val samples = 14
-        val hsv = FloatArray(3)
-        for (i in 0 until samples) {
-            val nx = leftX + (i.toFloat() / (samples - 1)) * (rightX - leftX)
-            val px = (nx * w).toInt().coerceIn(0, w - 1)
-            Color.colorToHSV(bitmap.getPixel(px, py), hsv)
-            if (hsv[2] > 0.35f) bright++
-        }
-        return bright.toFloat() / samples
     }
 
     private fun build6x6VisionGrid(

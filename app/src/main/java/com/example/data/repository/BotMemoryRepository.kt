@@ -59,19 +59,24 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
                 )
             )
         } else {
-            // Auto-repair legacy/drifted 8-Ball Pool profile so shot/physics engine runs cleanly
+            // Auto-repair legacy/drifted 8-Ball Pool profile so shot/physics & scalar ranges run cleanly
             existing.filter {
-                it.targetPackage.contains("eightballpool", ignoreCase = true) &&
-                    it.botMode != "POOL_AIM" &&
-                    it.physicsSamplesCount == 0
+                it.targetPackage.contains("eightballpool", ignoreCase = true)
             }.forEach { poolProfile ->
-                dao.updateProfile(
-                    poolProfile.copy(
-                        botMode = "POOL_AIM",
-                        isLandscapeGame = true,
-                        updatedAt = System.currentTimeMillis()
+                val needsModeFix = poolProfile.botMode != "POOL_AIM" && poolProfile.physicsSamplesCount == 0
+                val needsPhysicsClamp = poolProfile.learnedPowerScale !in 0.78f..1.22f ||
+                    poolProfile.learnedFrictionCoef !in 0.28f..0.78f
+                if (needsModeFix || needsPhysicsClamp) {
+                    dao.updateProfile(
+                        poolProfile.copy(
+                            botMode = if (needsModeFix) "POOL_AIM" else poolProfile.botMode,
+                            isLandscapeGame = if (needsModeFix) true else poolProfile.isLandscapeGame,
+                            learnedPowerScale = poolProfile.learnedPowerScale.coerceIn(0.78f, 1.22f),
+                            learnedFrictionCoef = poolProfile.learnedFrictionCoef.coerceIn(0.28f, 0.78f),
+                            updatedAt = System.currentTimeMillis()
+                        )
                     )
-                )
+                }
             }
         }
     }
@@ -128,6 +133,7 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
                 learnedFrictionCoef = 0.52f,
                 learnedCutBiasDeg = 0.0f,
                 physicsSamplesCount = 0,
+                humanShotsObserved = 0,
                 explorationRate = 0.25f,
                 updatedAt = System.currentTimeMillis()
             )
@@ -161,7 +167,10 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
         sb.append("    \"totalRounds\": ${profile?.totalEpisodes ?: 0},\n")
         sb.append("    \"totalSteps\": ${profile?.totalSteps ?: 0},\n")
         sb.append("    \"replayUpdates\": ${profile?.totalReplayUpdates ?: 0},\n")
-        sb.append("    \"learnedQPairs\": ${qEntries.size}\n")
+        sb.append("    \"learnedQPairs\": ${qEntries.size},\n")
+        sb.append("    \"botSeat\": \"${profile?.botSeatSide ?: "LEFT"}\",\n")
+        sb.append("    \"preferredSuit\": \"${profile?.preferredSuit ?: "AUTO"}\",\n")
+        sb.append("    \"humanShotsObserved\": ${profile?.humanShotsObserved ?: 0}\n")
         sb.append("  },\n")
         sb.append("  \"topQPolicies\": [\n")
         val topQ = qEntries.sortedByDescending { it.qValue }.take(12)

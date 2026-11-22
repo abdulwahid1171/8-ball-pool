@@ -30,9 +30,11 @@ import com.example.data.db.TrainingProfileEntity
 import com.example.data.db.TrainingSessionEntity
 import com.example.domain.physics.PhysicsEstimator
 import com.example.domain.rl.BotAction
+import com.example.domain.vision.PoolFrameAnalysis
 import com.example.domain.vision.PoolVisionAnalyzer
 import com.example.domain.vision.ScreenFrameAnalyzer
 import com.example.domain.vision.ScreenPerception
+import com.example.domain.vision.TurnOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -41,6 +43,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 class ScreenCaptureService : Service() {
@@ -85,6 +88,7 @@ class ScreenCaptureService : Service() {
     private var currentEpisodeReward = 0f
     private var episodeStartMs = System.currentTimeMillis()
     private var staleFrames = 0
+    private var humanPreShotAnalysis: PoolFrameAnalysis? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -283,6 +287,10 @@ class ScreenCaptureService : Service() {
             episodeStartMs = System.currentTimeMillis()
             lastPerception = null
             lastAction = null
+            humanPreShotAnalysis = null
+            if (initialProfile != null) {
+                BotServiceBridge.setHumanShotsObserved(initialProfile.humanShotsObserved)
+            }
 
             while (isActive) {
                 val (screenW, screenH, _) = getDisplayMetricsInfo()
@@ -346,12 +354,21 @@ class ScreenCaptureService : Service() {
             return
         }
 
+        val telemetry = BotServiceBridge.telemetry.value
+        val effectiveSeat = (telemetry.manualSeatSideOverride ?: profile.botSeatSide).uppercase()
+
         BotServiceBridge.setCaptureSizeLabel("${bitmap.width}x${bitmap.height}")
-        val analysis = PoolVisionAnalyzer.analyze(bitmap, profile)
+        val analysis = PoolVisionAnalyzer.analyze(
+            bitmap = bitmap,
+            profile = profile,
+            seatOverride = telemetry.manualSeatSideOverride,
+            suitOverride = telemetry.manualSuitOverride
+        )
         bitmap.recycle()
 
+        BotServiceBridge.setHumanShotsObserved(profile.humanShotsObserved)
+
         val shot = analysis.plannedShot
-        val telemetry = BotServiceBridge.telemetry.value
         val plannedDecision = if (shot != null) {
             app.trainingEngine.selectAction(
                 profileId = profile.id,
@@ -370,6 +387,13 @@ class ScreenCaptureService : Service() {
             telemetry.manualPowerOverride ?: 0f
         }
 
+        val turnOwnerLabel = when {
+            effectiveSeat == "WATCH" -> "WATCH (${analysis.turnOwner.name.take(5)})"
+            analysis.isMyTurn -> "BOT TURN ($effectiveSeat)"
+            analysis.turnOwner != TurnOwner.NONE -> "HUMAN TURN"
+            else -> "WAIT / ROLLING"
+        }
+
         BotServiceBridge.updatePoolObservation(
             visionGrid = analysis.visionGrid,
             stateHash = shot?.stateHash ?: "POOL_SCANNING",
@@ -382,14 +406,113 @@ class ScreenCaptureService : Service() {
             pocketId = shot?.pocket?.id,
             cutAngleDeg = shot?.cutAngleDeg ?: 0f,
             plannedPowerFraction = plannedPowerFrac,
-            summary = "${bitmap.width}x${bitmap.height} • ${analysis.summary}"
+            summary = "${bitmap.width}x${bitmap.height} • ${analysis.summary}",
+            turnOwnerLabel = turnOwnerLabel,
+            detectedSuitLabel = analysis.detectedSuit.name,
+            effectiveSuitLabel = analysis.effectiveSuit.name
         )
 
         val a11y = GameBotAccessibilityService.instance
 
         // Block ONLY if NeuroBot's own UI is visibly resumed in foreground or Accessibility isn't connected.
-        // Do NOT block on stale AccessibilityEvent package names since OpenGL games like 8-Ball Pool rarely emit them!
         if (telemetry.isOwnAppForeground || a11y == null) {
+            return
+        }
+
+        // Real-time Human Shot Observation & Imitation Learning (passive, zero screen touch!)
+        val prevHuman = humanPreShotAnalysis
+        if (profile.watchHumanLearn && prevHuman != null) {
+            val preCue = prevHuman.cueBall
+            val currCue = analysis.cueBall
+            val cueDisplaced = preCue != null && currCue != null &&
+                hypot(currCue.normX - preCue.normX, currCue.normY - preCue.normY) > 0.026f
+            val powerBarReleased = prevHuman.powerBarVisible && !analysis.powerBarVisible
+            val turnTransitioned = analysis.turnOwner != prevHuman.turnOwner
+            val ballsReduced = analysis.allTableTargets.size < prevHuman.allTableTargets.size
+
+            if (cueDisplaced || powerBarReleased || turnTransitioned || ballsReduced) {
+                BotServiceBridge.appendLog("Watching human shot... measuring roll & outcome")
+                delay(3200L)
+                val postBmp = captureLatestBitmap()
+                val postAnalysis = if (postBmp != null) {
+                    val parsed = PoolVisionAnalyzer.analyze(
+                        bitmap = postBmp,
+                        profile = profile,
+                        seatOverride = telemetry.manualSeatSideOverride,
+                        suitOverride = telemetry.manualSuitOverride
+                    )
+                    postBmp.recycle()
+                    parsed
+                } else {
+                    analysis
+                }
+
+                val humanKeptTurn = (postAnalysis.turnOwner == prevHuman.turnOwner)
+                val humanPotted = (postAnalysis.allTableTargets.size < prevHuman.allTableTargets.size) ||
+                    (humanKeptTurn && postAnalysis.pottedOccupiedRatio > prevHuman.pottedOccupiedRatio + 0.05f)
+
+                val obs = PhysicsEstimator.evaluateHumanShotObservation(
+                    profile = profile,
+                    shotNumber = profile.physicsSamplesCount + 1,
+                    preAnalysis = prevHuman,
+                    postAnalysis = postAnalysis,
+                    pottedBall = humanPotted,
+                    keptTurn = humanKeptTurn
+                )
+                humanPreShotAnalysis = null
+                if (obs != null) {
+                    app.repository.insertShotPhysics(obs.shotLog)
+                    app.repository.updateProfile(obs.updatedProfile)
+                    BotServiceBridge.setHumanShotsObserved(obs.updatedProfile.humanShotsObserved)
+                    BotServiceBridge.updateShotForceAndPhysics(
+                        shotPowerFraction = obs.inferredPowerFraction,
+                        estimatedFriction = obs.updatedProfile.learnedFrictionCoef
+                    )
+                    currentStep++
+                    app.trainingEngine.recordStep(
+                        profileId = profile.id,
+                        episodeNumber = currentEpisode,
+                        stepIndex = currentStep,
+                        stateHash = obs.inferredStateHash,
+                        stateSummary = obs.inferredStateSummary,
+                        action = obs.matchedAction,
+                        reward = obs.reward,
+                        nextStateHash = postAnalysis.plannedShot?.stateHash ?: "POOL_POST",
+                        isTerminal = !humanKeptTurn,
+                        availableActions = BotAction.POOL_SHOT_ACTIONS,
+                        learningRate = profile.learningRate,
+                        discountFactor = profile.discountFactor,
+                        source = "HUMAN_OBSERVED",
+                        screenNotes = "Watched Human -> ${obs.pocketId} | Power ${(obs.inferredPowerFraction * 100).toInt()}% | Potted=$humanPotted"
+                    )
+                    app.trainingEngine.flushToDatabase(profile.id)
+                    BotServiceBridge.updateLiveDecision(
+                        visionGrid = prevHuman.visionGrid,
+                        stateHash = obs.inferredStateHash,
+                        action = obs.matchedAction,
+                        reward = obs.reward,
+                        episodeCount = currentEpisode,
+                        stepCount = currentStep,
+                        episodeReward = currentEpisodeReward,
+                        note = "Learned from Human #${obs.updatedProfile.humanShotsObserved}: [${obs.matchedAction.shortCode}] -> ${obs.pocketId} (r=${"%.1f".format(obs.reward)})"
+                    )
+                    updateNotification("Watched Human Shot #${obs.updatedProfile.humanShotsObserved} (${if (humanPotted) "Potted" else "Saved"})")
+                }
+                return
+            } else if (!analysis.isMyTurn && analysis.turnOwner != TurnOwner.NONE && analysis.cueBall != null) {
+                humanPreShotAnalysis = analysis
+            }
+        } else if (profile.watchHumanLearn) {
+            val isWatchedHumanTurn = (effectiveSeat == "WATCH" && analysis.turnOwner != TurnOwner.NONE) ||
+                (!analysis.isMyTurn && analysis.turnOwner != TurnOwner.NONE)
+            if (isWatchedHumanTurn && analysis.cueBall != null) {
+                humanPreShotAnalysis = analysis
+                return
+            }
+        }
+
+        // Strict Turn Guard: NEVER touch the screen on Human's turn or in WATCH mode (unless user explicitly tapped Shoot)
+        if (effectiveSeat == "WATCH" && !forceManualShot) {
             return
         }
         if ((!analysis.isMyTurn && !forceManualShot) || shot == null || plannedDecision == null) {
@@ -437,13 +560,18 @@ class ScreenCaptureService : Service() {
         var postCueBall: com.example.domain.vision.DetectedBall? = null
 
         if (postBitmap != null) {
-            val postAnalysis = PoolVisionAnalyzer.analyze(postBitmap, profile)
+            val postAnalysis = PoolVisionAnalyzer.analyze(
+                bitmap = postBitmap,
+                profile = profile,
+                seatOverride = telemetry.manualSeatSideOverride,
+                suitOverride = telemetry.manualSuitOverride
+            )
             postBitmap.recycle()
             postCueBall = postAnalysis.cueBall
             nextStateHash = postAnalysis.plannedShot?.stateHash ?: "POOL_POST"
 
             val pottedIncreased = postAnalysis.pottedOccupiedRatio > analysis.pottedOccupiedRatio + 0.05f
-            val targetsReduced = postAnalysis.targetBalls.size < analysis.targetBalls.size
+            val targetsReduced = postAnalysis.allTableTargets.size < analysis.allTableTargets.size
             keptTurn = postAnalysis.isMyTurn
             pottedBall = pottedIncreased || (keptTurn && targetsReduced)
 

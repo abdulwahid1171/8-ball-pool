@@ -51,6 +51,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import com.example.data.db.TrainingProfileEntity
+import com.example.domain.vision.BallSuit
 import com.example.ui.i18n.BotCopy
 import com.example.ui.theme.AmberPulse
 import com.example.ui.theme.CrimsonAlert
@@ -205,11 +206,38 @@ fun CalibratorScreen(
                                         )
                                     }
                                     analysis.targetBalls.forEach { ball ->
+                                        val ballCenter = Offset(ball.normX * size.width, ball.normY * size.height)
+                                        when (ball.suit) {
+                                            BallSuit.STRIPE -> {
+                                                drawCircle(
+                                                    color = CyanElectric,
+                                                    radius = 9.dp.toPx(),
+                                                    center = ballCenter,
+                                                    style = Stroke(width = 2.dp.toPx())
+                                                )
+                                                drawCircle(
+                                                    color = Color.White,
+                                                    radius = 5.5.dp.toPx(),
+                                                    center = ballCenter,
+                                                    style = Stroke(width = 1.5.dp.toPx())
+                                                )
+                                            }
+                                            else -> {
+                                                drawCircle(
+                                                    color = EmeraldNeon,
+                                                    radius = 8.dp.toPx(),
+                                                    center = ballCenter,
+                                                    style = Stroke(width = 2.2.dp.toPx())
+                                                )
+                                            }
+                                        }
+                                    }
+                                    analysis.eightBall?.let { eight ->
                                         drawCircle(
-                                            color = EmeraldNeon,
-                                            radius = 8.dp.toPx(),
-                                            center = Offset(ball.normX * size.width, ball.normY * size.height),
-                                            style = Stroke(width = 2.dp.toPx())
+                                            color = CrimsonAlert,
+                                            radius = 9.dp.toPx(),
+                                            center = Offset(eight.normX * size.width, eight.normY * size.height),
+                                            style = Stroke(width = 2.5.dp.toPx())
                                         )
                                     }
                                     analysis.cueBall?.let { cue ->
@@ -244,6 +272,11 @@ fun CalibratorScreen(
                             text = analysis.summary,
                             style = MaterialTheme.typography.labelMedium,
                             color = if (analysis.isMyTurn) EmeraldNeon else AmberPulse
+                        )
+                        Text(
+                            text = "TurnOwner: ${analysis.turnOwner.name} | HUD Suit: ${analysis.detectedSuit.name} | Legend: Green=Solid, Cyan=Stripe, Red=8-Ball",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         analysis.plannedShot?.let { shot ->
                             Text(

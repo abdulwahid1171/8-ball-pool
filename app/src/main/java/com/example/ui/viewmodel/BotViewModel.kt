@@ -138,6 +138,46 @@ class BotViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    fun setBotSeatSide(seatSide: String) {
+        val normalized = seatSide.uppercase()
+        BotServiceBridge.setManualSeatSideOverride(normalized)
+        val profile = activeProfile.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateProfile(
+                profile.copy(
+                    botSeatSide = normalized,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    fun setPreferredSuit(suit: String) {
+        val normalized = suit.uppercase()
+        BotServiceBridge.setManualSuitOverride(normalized)
+        val profile = activeProfile.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateProfile(
+                profile.copy(
+                    preferredSuit = normalized,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
+    fun setWatchHumanLearn(enabled: Boolean) {
+        val profile = activeProfile.value ?: return
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.updateProfile(
+                profile.copy(
+                    watchHumanLearn = enabled,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+    }
+
     fun triggerExperienceReplay() {
         val profile = activeProfile.value ?: return
         viewModelScope.launch(Dispatchers.IO) {

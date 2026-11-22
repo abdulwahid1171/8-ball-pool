@@ -44,6 +44,11 @@ data class TrainingProfileEntity(
     val learnedFrictionCoef: Float = 0.52f,
     val learnedCutBiasDeg: Float = 0.0f,
     val physicsSamplesCount: Int = 0,
+    // Turn ownership & suit/imitation configuration
+    val botSeatSide: String = "LEFT", // "LEFT", "RIGHT", "WATCH"
+    val preferredSuit: String = "AUTO", // "AUTO", "SOLIDS", "STRIPES"
+    val watchHumanLearn: Boolean = true,
+    val humanShotsObserved: Int = 0,
     // Training stats
     val totalEpisodes: Int = 0,
     val totalSteps: Int = 0,
