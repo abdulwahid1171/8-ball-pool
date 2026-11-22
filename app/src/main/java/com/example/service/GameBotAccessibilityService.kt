@@ -8,6 +8,15 @@ import android.util.DisplayMetrics
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resume
 
 class GameBotAccessibilityService : AccessibilityService() {
 
@@ -17,10 +26,22 @@ class GameBotAccessibilityService : AccessibilityService() {
             private set
     }
 
+    private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private var overlayController: BotFloatingOverlay? = null
+    private var overlayCollectorJob: Job? = null
+
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         BotServiceBridge.setAccessibilityConnected(true)
+
+        overlayController = BotFloatingOverlay(this)
+        overlayCollectorJob?.cancel()
+        overlayCollectorJob = serviceScope.launch {
+            BotServiceBridge.telemetry.collectLatest { telemetry ->
+                overlayController?.showOrUpdate(telemetry)
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -54,26 +75,85 @@ class GameBotAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
+        overlayCollectorJob?.cancel()
+        overlayController?.hide()
         instance = null
         BotServiceBridge.setAccessibilityConnected(false)
         return super.onUnbind(intent)
     }
 
     override fun onDestroy() {
+        overlayCollectorJob?.cancel()
+        overlayController?.hide()
+        serviceScope.cancel()
         instance = null
         BotServiceBridge.setAccessibilityConnected(false)
         super.onDestroy()
     }
 
+    suspend fun dispatchNormalizedTapAwait(normX: Float, normY: Float, holdMs: Long = 55L): Boolean {
+        return suspendCancellableCoroutine { cont ->
+            val (w, h) = getScreenSizePx()
+            val px = (normX.coerceIn(0.01f, 0.99f) * w)
+            val py = (normY.coerceIn(0.01f, 0.99f) * h)
+            val path = Path().apply { moveTo(px, py) }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, holdMs.coerceIn(30L, 200L))
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }, null)
+            if (!dispatched && cont.isActive) cont.resume(false)
+        }
+    }
+
+    suspend fun dispatchNormalizedSwipeAwait(
+        startNormX: Float,
+        startNormY: Float,
+        endNormX: Float,
+        endNormY: Float,
+        durationMs: Long = 320L
+    ): Boolean {
+        return suspendCancellableCoroutine { cont ->
+            val (w, h) = getScreenSizePx()
+            val sx = startNormX.coerceIn(0.02f, 0.98f) * w
+            val sy = startNormY.coerceIn(0.02f, 0.98f) * h
+            val ex = endNormX.coerceIn(0.02f, 0.98f) * w
+            val ey = endNormY.coerceIn(0.02f, 0.98f) * h
+
+            val path = Path().apply {
+                moveTo(sx, sy)
+                lineTo(ex, ey)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(80L, 900L))
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            val dispatched = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(true)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    if (cont.isActive) cont.resume(false)
+                }
+            }, null)
+            if (!dispatched && cont.isActive) cont.resume(false)
+        }
+    }
+
     fun dispatchNormalizedTap(normX: Float, normY: Float, onResult: ((Boolean) -> Unit)? = null) {
         val (w, h) = getScreenSizePx()
-        val px = (normX.coerceIn(0.02f, 0.98f) * w)
-        val py = (normY.coerceIn(0.02f, 0.98f) * h)
+        val px = (normX.coerceIn(0.01f, 0.99f) * w)
+        val py = (normY.coerceIn(0.01f, 0.99f) * h)
 
         val path = Path().apply {
             moveTo(px, py)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, 45L)
+        val stroke = GestureDescription.StrokeDescription(path, 0L, 50L)
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {
@@ -95,16 +175,16 @@ class GameBotAccessibilityService : AccessibilityService() {
         onResult: ((Boolean) -> Unit)? = null
     ) {
         val (w, h) = getScreenSizePx()
-        val sx = startNormX.coerceIn(0.05f, 0.95f) * w
-        val sy = startNormY.coerceIn(0.05f, 0.95f) * h
-        val ex = endNormX.coerceIn(0.05f, 0.95f) * w
-        val ey = endNormY.coerceIn(0.05f, 0.95f) * h
+        val sx = startNormX.coerceIn(0.02f, 0.98f) * w
+        val sy = startNormY.coerceIn(0.02f, 0.98f) * h
+        val ex = endNormX.coerceIn(0.02f, 0.98f) * w
+        val ey = endNormY.coerceIn(0.02f, 0.98f) * h
 
         val path = Path().apply {
             moveTo(sx, sy)
             lineTo(ex, ey)
         }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(80L, 600L))
+        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs.coerceIn(80L, 900L))
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
         dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(gestureDescription: GestureDescription?) {

@@ -384,6 +384,95 @@ fun BotControlScreen(
             }
         }
 
+        // Live Force Meter + Floating Overlay Info
+        item {
+            val activeForce = telemetry.manualPowerOverride
+                ?: telemetry.plannedPowerFraction.takeIf { it > 0.01f }
+                ?: telemetry.lastShotPowerFraction
+            val forcePct = (activeForce * 100f).toInt().coerceIn(0, 100)
+            val lastForcePct = (telemetry.lastShotPowerFraction * 100f).toInt()
+
+            Card(
+                shape = MaterialTheme.shapes.medium,
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = if (isUrdu) "شاٹ فورس اور منی فلوٹنگ آئیکون" else "Live Shot Force & Mini Floating Icon",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        StatusBadge(
+                            isActive = telemetry.isScreenCaptureActive && telemetry.isAccessibilityConnected,
+                            activeText = if (isUrdu) "آئیکون آن" else "HUD ON",
+                            inactiveText = if (isUrdu) "آف" else "HUD OFF"
+                        )
+                    }
+                    Text(
+                        text = if (isUrdu) {
+                            "بوٹ آن کرنے پر گیم کے اوپر ایک چھوٹا آئیکون نظر آئے گا؛ اس پر ٹیپ کرنے سے وہ بڑا ہو کر ON/OFF اور لائیو فورس دکھاتا ہے۔"
+                        } else {
+                            "When active over a game, a small draggable NeuroBot orb floats on screen. Tap it to expand ON/OFF, live Shot Force, and quick power presets."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = if (telemetry.manualPowerOverride != null) {
+                                "Force: ${forcePct}% (Manual)"
+                            } else {
+                                "Force: ${forcePct}% (AI Auto)"
+                            },
+                            style = MaterialTheme.typography.labelMedium,
+                            color = AmberPulse
+                        )
+                        Text(
+                            text = "Last: ${if (lastForcePct > 0) "$lastForcePct%" else "--"} • Fric ${"%.2f".format(telemetry.estimatedFriction)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = CyanElectric
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf<Pair<String, Float?>>(
+                            "Auto" to null,
+                            "35%" to 0.35f,
+                            "65%" to 0.65f,
+                            "90%" to 0.90f
+                        ).forEach { (label, frac) ->
+                            val selected = if (frac == null) {
+                                telemetry.manualPowerOverride == null
+                            } else {
+                                telemetry.manualPowerOverride != null &&
+                                    kotlin.math.abs(telemetry.manualPowerOverride - frac) < 0.05f
+                            }
+                            FilterChip(
+                                selected = selected,
+                                onClick = { com.example.service.BotServiceBridge.setManualPowerOverride(frac) },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("chip_force_${label.lowercase()}")
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
         // Live Screen Radar + External Telemetry
         item {
             Row(
@@ -421,7 +510,7 @@ fun BotControlScreen(
                                 color = if (telemetry.isMyTurnDetected) EmeraldNeon else AmberPulse
                             )
                             Text(
-                                text = "Targets: ${telemetry.detectedTargetBallsCount} • Pocket: ${telemetry.plannedPocketId ?: "-"}",
+                                text = "Cue: ${if (telemetry.isCueBallDetected) "OK" else "Scan"} • Targets: ${telemetry.detectedTargetBallsCount} • Pkt: ${telemetry.plannedPocketId ?: "-"}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurface
                             )

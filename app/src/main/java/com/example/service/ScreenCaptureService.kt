@@ -49,6 +49,7 @@ class ScreenCaptureService : Service() {
         const val ACTION_START = "com.example.action.START_BOT_CAPTURE"
         const val ACTION_TOGGLE_PAUSE = "com.example.action.TOGGLE_PAUSE_BOT"
         const val ACTION_RUN_REPLAY = "com.example.action.RUN_REPLAY_BOT"
+        const val ACTION_SHOOT_NOW = "com.example.action.SHOOT_NOW_BOT"
         const val ACTION_STOP = "com.example.action.STOP_BOT_CAPTURE"
 
         const val EXTRA_RESULT_CODE = "extra_result_code"
@@ -64,8 +65,17 @@ class ScreenCaptureService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private var displayListener: DisplayManager.DisplayListener? = null
 
+    private var currentCaptureW = 0
+    private var currentCaptureH = 0
+
+    @Volatile
     private var isPaused = false
+
+    @Volatile
+    private var manualShotRequested = false
+
     private var activeProfileId = 1L
     private var lastPerception: ScreenPerception? = null
     private var lastAction: BotAction? = null
@@ -110,8 +120,13 @@ class ScreenCaptureService : Service() {
                     running = !isPaused,
                     paused = isPaused
                 )
-                BotServiceBridge.appendLog(if (isPaused) "Live Bot paused from notification." else "Live Bot resumed.")
-                updateNotification(if (isPaused) "Paused — tap Resume to continue." else "Watching game screen & learning...")
+                BotServiceBridge.appendLog(if (isPaused) "Bot switched OFF (Paused)." else "Bot switched ON (Active).")
+                updateNotification(if (isPaused) "Paused — tap ON in floating widget or notification." else "Watching game screen & learning...")
+            }
+
+            ACTION_SHOOT_NOW -> {
+                manualShotRequested = true
+                BotServiceBridge.appendLog("Manual Shoot requested from floating panel.")
             }
 
             ACTION_RUN_REPLAY -> {
@@ -183,8 +198,9 @@ class ScreenCaptureService : Service() {
         }, Handler(Looper.getMainLooper()))
 
         val (screenW, screenH, densityDpi) = getDisplayMetricsInfo()
-        val captureW = (screenW / 3).coerceIn(240, 720)
-        val captureH = (screenH / 3).coerceIn(240, 720)
+        val (captureW, captureH) = computeCaptureDimensions(screenW, screenH)
+        currentCaptureW = captureW
+        currentCaptureH = captureH
 
         imageReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
         virtualDisplay = projection.createVirtualDisplay(
@@ -198,16 +214,48 @@ class ScreenCaptureService : Service() {
             null
         )
 
+        registerOrientationWatcher()
+
         isPaused = false
         BotServiceBridge.setScreenCaptureState(active = true, running = true, paused = false)
         BotServiceBridge.appendLog("Screen Reader active (${captureW}x${captureH}). Switch to your game now!")
         startAutomationLoop()
     }
 
+    private fun computeCaptureDimensions(screenW: Int, screenH: Int): Pair<Int, Int> {
+        val isLandscape = screenW >= screenH
+        return if (isLandscape) {
+            val w = (screenW / 2).coerceIn(480, 960)
+            val h = ((w.toFloat() / screenW.coerceAtLeast(1)) * screenH).roundToInt().coerceIn(240, 640)
+            w to h
+        } else {
+            val h = (screenH / 2).coerceIn(480, 960)
+            val w = ((h.toFloat() / screenH.coerceAtLeast(1)) * screenW).roundToInt().coerceIn(240, 640)
+            w to h
+        }
+    }
+
+    private fun registerOrientationWatcher() {
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        displayListener?.let { dm.unregisterDisplayListener(it) }
+        val listener = object : DisplayManager.DisplayListener {
+            override fun onDisplayAdded(displayId: Int) = Unit
+            override fun onDisplayRemoved(displayId: Int) = Unit
+            override fun onDisplayChanged(displayId: Int) {
+                val (screenW, screenH, _) = getDisplayMetricsInfo()
+                if ((screenW > screenH) != (currentCaptureW > currentCaptureH)) {
+                    reconfigureVirtualDisplay(screenW, screenH)
+                }
+            }
+        }
+        displayListener = listener
+        dm.registerDisplayListener(listener, Handler(Looper.getMainLooper()))
+    }
+
     private fun reconfigureVirtualDisplay(newWidth: Int, newHeight: Int) {
         val display = virtualDisplay ?: return
-        val captureW = (newWidth / 3).coerceIn(240, 720)
-        val captureH = (newHeight / 3).coerceIn(240, 720)
+        val (captureW, captureH) = computeCaptureDimensions(newWidth, newHeight)
+        if (captureW == currentCaptureW && captureH == currentCaptureH) return
         val densityDpi = resources.displayMetrics.densityDpi
         try {
             val newReader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
@@ -215,7 +263,9 @@ class ScreenCaptureService : Service() {
             display.surface = newReader.surface
             imageReader?.close()
             imageReader = newReader
-            BotServiceBridge.appendLog("Screen orientation/size adapted to ${captureW}x${captureH}.")
+            currentCaptureW = captureW
+            currentCaptureH = captureH
+            BotServiceBridge.appendLog("Adapted capture buffer to ${captureW}x${captureH}.")
         } catch (_: Exception) {
         }
     }
@@ -234,14 +284,26 @@ class ScreenCaptureService : Service() {
             lastAction = null
 
             while (isActive) {
+                val (screenW, screenH, _) = getDisplayMetricsInfo()
+                if ((screenW > screenH) != (currentCaptureW > currentCaptureH)) {
+                    reconfigureVirtualDisplay(screenW, screenH)
+                    delay(180L)
+                }
+
                 val profile = app.repository.getProfile(activeProfileId)
                 val interval = (profile?.actionIntervalMs ?: 600L).coerceIn(200L, 3000L)
 
-                if (!isPaused && profile != null) {
-                    if (profile.botMode == "POOL_AIM") {
-                        runPoolShotCycle(app, profile)
-                    } else {
-                        runGeneralTapCycle(app, profile)
+                if (profile != null) {
+                    val triggerManual = manualShotRequested
+                    if (!isPaused || triggerManual) {
+                        if (profile.botMode == "POOL_AIM") {
+                            runPoolShotCycle(app, profile, forceManualShot = triggerManual)
+                        } else {
+                            runGeneralTapCycle(app, profile)
+                        }
+                        if (triggerManual) {
+                            manualShotRequested = false
+                        }
                     }
                 }
                 delay(interval)
@@ -249,15 +311,47 @@ class ScreenCaptureService : Service() {
         }
     }
 
+    private fun isNonGameSystemPackage(pkg: String): Boolean {
+        val lower = pkg.lowercase()
+        return pkg == packageName ||
+            pkg == "None" ||
+            lower.contains("systemui") ||
+            lower.contains("upslide") ||
+            lower.contains("launcher") ||
+            lower.contains("settings") ||
+            lower.contains("inputmethod") ||
+            lower.contains("keyguard")
+    }
+
     private suspend fun runPoolShotCycle(
         app: NeuroBotApplication,
-        profile: TrainingProfileEntity
+        profile: TrainingProfileEntity,
+        forceManualShot: Boolean = false
     ) {
         val bitmap = captureLatestBitmap() ?: return
         val analysis = PoolVisionAnalyzer.analyze(bitmap, profile)
         bitmap.recycle()
 
         val shot = analysis.plannedShot
+        val telemetry = BotServiceBridge.telemetry.value
+        val plannedDecision = if (shot != null) {
+            app.trainingEngine.selectAction(
+                profileId = profile.id,
+                stateHash = shot.stateHash,
+                availableActions = BotAction.POOL_SHOT_ACTIONS,
+                epsilon = profile.explorationRate
+            )
+        } else null
+
+        val plannedPowerFrac = if (shot != null && plannedDecision != null) {
+            telemetry.manualPowerOverride ?: run {
+                val rawPower = (shot.basePowerFraction + plannedDecision.action.powerFraction) * 0.5f
+                PhysicsEstimator.computeCalibratedPower(rawPower, profile)
+            }
+        } else {
+            telemetry.manualPowerOverride ?: 0f
+        }
+
         BotServiceBridge.updatePoolObservation(
             visionGrid = analysis.visionGrid,
             stateHash = shot?.stateHash ?: "POOL_SCANNING",
@@ -268,50 +362,53 @@ class ScreenCaptureService : Service() {
             targetX = shot?.targetBall?.normX,
             targetY = shot?.targetBall?.normY,
             pocketId = shot?.pocket?.id,
+            cutAngleDeg = shot?.cutAngleDeg ?: 0f,
+            plannedPowerFraction = plannedPowerFrac,
             summary = analysis.summary
         )
 
-        val telemetry = BotServiceBridge.telemetry.value
-        val isOverOwnApp = telemetry.activeForegroundPackage == packageName
+        val pkg = telemetry.activeForegroundPackage
+        val isSystemOrOwn = isNonGameSystemPackage(pkg)
         val a11y = GameBotAccessibilityService.instance
 
-        if (!analysis.isMyTurn || shot == null || isOverOwnApp || a11y == null) {
+        if (isSystemOrOwn || a11y == null) {
+            return
+        }
+        if ((!analysis.isMyTurn && !forceManualShot) || shot == null || plannedDecision == null) {
             return
         }
 
-        val decision = app.trainingEngine.selectAction(
-            profileId = profile.id,
-            stateHash = shot.stateHash,
-            availableActions = BotAction.POOL_SHOT_ACTIONS,
-            epsilon = profile.explorationRate
-        )
-
-        val combinedTrimDeg = decision.action.angleTrimDeg + profile.learnedCutBiasDeg
+        val combinedTrimDeg = plannedDecision.action.angleTrimDeg + profile.learnedCutBiasDeg
         val (aimX, aimY) = PoolVisionAnalyzer.computeAimPointWithTrim(shot, combinedTrimDeg)
-        // 1. Swipe from cue ball toward computed ghost-ball aim point
-        a11y.dispatchNormalizedSwipe(
-            startNormX = shot.cueBall.normX,
-            startNormY = shot.cueBall.normY,
-            endNormX = aimX,
-            endNormY = aimY,
-            durationMs = 260L
-        )
-        delay(340L)
 
-        // 2. Pull the vertical power bar downward proportional to Q-learned + Physics-calibrated shot power
-        val rawPower = ((shot.basePowerFraction + decision.action.powerFraction) * 0.5f)
-        val powerFrac = PhysicsEstimator.computeCalibratedPower(rawPower, profile)
-        val pullEndY = profile.powerBarTopY + powerFrac * (profile.powerBarBottomY - profile.powerBarTopY)
-        a11y.dispatchNormalizedSwipe(
+        // 1. Tap/aim accurately on the ghost-ball point on table felt to orient the cue stick
+        a11y.dispatchNormalizedTapAwait(aimX, aimY, holdMs = 55L)
+        delay(240L)
+
+        // 2. Pull the left vertical cue power slider down proportionally to Shot Force and release to fire
+        val powerFrac = plannedPowerFrac.coerceIn(0.22f, 0.95f)
+        val startBarY = (profile.powerBarTopY + 0.045f).coerceIn(0.24f, 0.42f)
+        val endBarY = (startBarY + powerFrac * (profile.powerBarBottomY - startBarY).coerceAtLeast(0.35f))
+            .coerceIn(startBarY + 0.08f, 0.90f)
+
+        BotServiceBridge.updateShotForceAndPhysics(
+            shotPowerFraction = powerFrac,
+            estimatedFriction = profile.learnedFrictionCoef
+        )
+        BotServiceBridge.appendLog(
+            "Aiming -> ${shot.pocket.id} (${shot.cutAngleDeg.toInt()}°) | Pulling Force ${(powerFrac * 100).toInt()}%"
+        )
+
+        a11y.dispatchNormalizedSwipeAwait(
             startNormX = profile.powerBarX,
-            startNormY = profile.powerBarTopY,
+            startNormY = startBarY,
             endNormX = profile.powerBarX,
-            endNormY = pullEndY,
-            durationMs = 360L
+            endNormY = endBarY,
+            durationMs = 540L
         )
 
-        // 3. Wait for balls to roll & settle, then read post-shot outcome + physics
-        delay(3400L)
+        // 3. Wait for balls to roll & settle, then inspect post-shot outcome + physics
+        delay(3600L)
         val postBitmap = captureLatestBitmap()
         var stepReward = 0.2f
         var nextStateHash = shot.stateHash
@@ -365,6 +462,10 @@ class ScreenCaptureService : Service() {
         )
         app.repository.insertShotPhysics(physicsOutcome.shotLog)
         app.repository.updateProfile(physicsOutcome.updatedProfile)
+        BotServiceBridge.updateShotForceAndPhysics(
+            shotPowerFraction = powerFrac,
+            estimatedFriction = physicsOutcome.updatedProfile.learnedFrictionCoef
+        )
 
         app.trainingEngine.recordStep(
             profileId = profile.id,
@@ -372,7 +473,7 @@ class ScreenCaptureService : Service() {
             stepIndex = currentStep,
             stateHash = shot.stateHash,
             stateSummary = shot.stateSummary,
-            action = decision.action,
+            action = plannedDecision.action,
             reward = stepReward,
             nextStateHash = nextStateHash,
             isTerminal = roundEnded,
@@ -380,21 +481,21 @@ class ScreenCaptureService : Service() {
             learningRate = profile.learningRate,
             discountFactor = profile.discountFactor,
             source = "LIVE_POOL",
-            screenNotes = "$outcomeNote | Pwr ${(powerFrac * 100).toInt()}% | Friction ${"%.2f".format(physicsOutcome.shotLog.estimatedFriction)}"
+            screenNotes = "$outcomeNote | Force ${(powerFrac * 100).toInt()}% | Friction ${"%.2f".format(physicsOutcome.shotLog.estimatedFriction)}"
         )
 
         BotServiceBridge.updateLiveDecision(
             visionGrid = analysis.visionGrid,
             stateHash = shot.stateHash,
-            action = decision.action,
+            action = plannedDecision.action,
             reward = stepReward,
             episodeCount = currentEpisode,
             stepCount = currentStep,
             episodeReward = currentEpisodeReward,
-            note = "Shot #$currentStep [${decision.action.shortCode}] -> ${shot.pocket.id} ($outcomeNote)"
+            note = "Shot #$currentStep [${plannedDecision.action.shortCode}] ${(powerFrac * 100).toInt()}% -> ${shot.pocket.id} ($outcomeNote)"
         )
 
-        updateNotification("Shot #$currentStep • ${shot.pocket.id} • $outcomeNote")
+        updateNotification("Shot #$currentStep • Force ${(powerFrac * 100).toInt()}% • ${shot.pocket.id}")
 
         if (roundEnded || currentStep % 4 == 0) {
             finalizeLiveEpisode(app, profile.id, currentEpisodeReward, BotAction.POOL_SHOT_ACTIONS, "LIVE_POOL")
@@ -411,6 +512,13 @@ class ScreenCaptureService : Service() {
         app: NeuroBotApplication,
         profile: TrainingProfileEntity
     ) {
+        val telemetry = BotServiceBridge.telemetry.value
+        val pkg = telemetry.activeForegroundPackage
+        // Never pollute memory or touch NeuroBot itself or system UI/notification/Vivo upslide
+        if (isNonGameSystemPackage(pkg)) {
+            return
+        }
+
         val bitmap = captureLatestBitmap() ?: return
         val perception = ScreenFrameAnalyzer.analyzeBitmap(
             bitmap = bitmap,
@@ -420,7 +528,6 @@ class ScreenCaptureService : Service() {
         )
         bitmap.recycle()
 
-        val telemetry = BotServiceBridge.telemetry.value
         val prev = lastPerception
         val prevAction = lastAction
 
@@ -451,7 +558,7 @@ class ScreenCaptureService : Service() {
                 learningRate = profile.learningRate,
                 discountFactor = profile.discountFactor,
                 source = "LIVE_SCREEN",
-                screenNotes = "${telemetry.activeForegroundPackage}: ${assessment.reason}"
+                screenNotes = "${pkg}: ${assessment.reason}"
             )
 
             if (assessment.isTerminal) {
@@ -471,16 +578,15 @@ class ScreenCaptureService : Service() {
         )
 
         val a11y = GameBotAccessibilityService.instance
-        val isOverOwnApp = telemetry.activeForegroundPackage == packageName
-        if (a11y != null && !isOverOwnApp) {
+        if (a11y != null) {
             when (decision.action) {
-                BotAction.MOVE_LEFT -> a11y.dispatchNormalizedTap(profile.tapLeftX, profile.tapLeftY)
-                BotAction.MOVE_RIGHT -> a11y.dispatchNormalizedTap(profile.tapRightX, profile.tapRightY)
-                BotAction.TAP_CENTER -> a11y.dispatchNormalizedTap(profile.tapCenterX, profile.tapCenterY)
-                BotAction.SWIPE_UP -> a11y.dispatchNormalizedSwipe(
+                BotAction.MOVE_LEFT -> a11y.dispatchNormalizedTapAwait(profile.tapLeftX, profile.tapLeftY)
+                BotAction.MOVE_RIGHT -> a11y.dispatchNormalizedTapAwait(profile.tapRightX, profile.tapRightY)
+                BotAction.TAP_CENTER -> a11y.dispatchNormalizedTapAwait(profile.tapCenterX, profile.tapCenterY)
+                BotAction.SWIPE_UP -> a11y.dispatchNormalizedSwipeAwait(
                     profile.tapCenterX, 0.72f, profile.tapCenterX, 0.34f
                 )
-                BotAction.SWIPE_DOWN -> a11y.dispatchNormalizedSwipe(
+                BotAction.SWIPE_DOWN -> a11y.dispatchNormalizedSwipeAwait(
                     profile.tapCenterX, 0.38f, profile.tapCenterX, 0.76f
                 )
                 else -> Unit
@@ -491,7 +597,7 @@ class ScreenCaptureService : Service() {
         lastPerception = perception
         lastAction = decision.action
 
-        val logLine = "Round $currentEpisode #$currentStep [${decision.action.shortCode}] r=${"%.2f".format(stepReward)} (${telemetry.activeForegroundPackage.substringAfterLast('.')})"
+        val logLine = "Round $currentEpisode #$currentStep [${decision.action.shortCode}] r=${"%.2f".format(stepReward)} (${pkg.substringAfterLast('.')})"
         BotServiceBridge.updateLiveDecision(
             visionGrid = perception.gridCells,
             stateHash = perception.stateHash,
@@ -616,6 +722,13 @@ class ScreenCaptureService : Service() {
     }
 
     private fun releaseProjectionResources() {
+        displayListener?.let { listener ->
+            try {
+                val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                dm.unregisterDisplayListener(listener)
+            } catch (_: Exception) {}
+        }
+        displayListener = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
         try { imageReader?.close() } catch (_: Exception) {}

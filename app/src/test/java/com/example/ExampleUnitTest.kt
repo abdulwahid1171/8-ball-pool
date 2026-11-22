@@ -152,6 +152,36 @@ class ExampleUnitTest {
         assertEquals(4, replayResult.qUpdatesApplied)
     }
 
+    @Test
+    fun repository_repairsDriftedEightBallPoolProfileBackToPoolAim() = runTest {
+        val fakeDao = InMemoryNeuroBotDao()
+        fakeDao.insertProfile(
+            TrainingProfileEntity(
+                id = 1L,
+                name = "8-Ball Pool Auto-Bot",
+                targetPackage = "com.miniclip.eightballpool",
+                botMode = "GENERAL_TAP",
+                physicsSamplesCount = 0
+            )
+        )
+        val repo = BotMemoryRepository(fakeDao)
+        repo.ensureDefaultProfiles()
+        val repaired = repo.getProfile(1L)!!
+        assertEquals("POOL_AIM", repaired.botMode)
+        assertTrue(repaired.isLandscapeGame)
+    }
+
+    @Test
+    fun serviceBridge_updatesManualForceAndShotPhysicsTelemetry() {
+        com.example.service.BotServiceBridge.setManualPowerOverride(0.65f)
+        com.example.service.BotServiceBridge.updateShotForceAndPhysics(0.65f, 0.48f)
+        val telemetry = com.example.service.BotServiceBridge.telemetry.value
+        assertEquals(0.65f, telemetry.manualPowerOverride!!, 0.001f)
+        assertEquals(0.65f, telemetry.lastShotPowerFraction, 0.001f)
+        assertEquals(0.48f, telemetry.estimatedFriction, 0.001f)
+        com.example.service.BotServiceBridge.setManualPowerOverride(null)
+    }
+
     private class InMemoryNeuroBotDao : NeuroBotDao {
         private val profilesList = mutableListOf<TrainingProfileEntity>()
         private val qList = mutableListOf<QTableEntryEntity>()

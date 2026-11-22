@@ -23,12 +23,18 @@ data class LiveBotTelemetry(
     val liveEpisodeReward: Float = 0f,
     val isMyTurnDetected: Boolean = false,
     val detectedTargetBallsCount: Int = 0,
+    val isCueBallDetected: Boolean = false,
     val poolAnalysisSummary: String = "Waiting for external game screen...",
     val cueBallX: Float? = null,
     val cueBallY: Float? = null,
     val targetBallX: Float? = null,
     val targetBallY: Float? = null,
     val plannedPocketId: String? = null,
+    val plannedCutAngleDeg: Float = 0f,
+    val plannedPowerFraction: Float = 0f,
+    val lastShotPowerFraction: Float = 0f,
+    val estimatedFriction: Float = 0.52f,
+    val manualPowerOverride: Float? = null,
     val liveLogLines: List<String> = emptyList()
 )
 
@@ -50,6 +56,14 @@ object BotServiceBridge {
                 isLiveBotPaused = paused
             )
         }
+    }
+
+    fun setManualPowerOverride(fraction: Float?) {
+        _telemetry.update {
+            it.copy(manualPowerOverride = fraction?.coerceIn(0.20f, 0.96f))
+        }
+        val label = if (fraction == null) "AUTO (AI + Physics)" else "${(fraction * 100).toInt()}%"
+        appendLog("Shot Force set to $label")
     }
 
     fun updateForegroundUiContext(
@@ -76,6 +90,8 @@ object BotServiceBridge {
         targetX: Float?,
         targetY: Float?,
         pocketId: String?,
+        cutAngleDeg: Float = 0f,
+        plannedPowerFraction: Float = 0f,
         summary: String
     ) {
         _telemetry.update {
@@ -84,12 +100,27 @@ object BotServiceBridge {
                 latestStateHash = stateHash,
                 isMyTurnDetected = isMyTurn,
                 detectedTargetBallsCount = targetsCount,
+                isCueBallDetected = cueX != null && cueY != null,
                 cueBallX = cueX,
                 cueBallY = cueY,
                 targetBallX = targetX,
                 targetBallY = targetY,
                 plannedPocketId = pocketId,
+                plannedCutAngleDeg = cutAngleDeg,
+                plannedPowerFraction = plannedPowerFraction,
                 poolAnalysisSummary = summary
+            )
+        }
+    }
+
+    fun updateShotForceAndPhysics(
+        shotPowerFraction: Float,
+        estimatedFriction: Float
+    ) {
+        _telemetry.update {
+            it.copy(
+                lastShotPowerFraction = shotPowerFraction,
+                estimatedFriction = estimatedFriction
             )
         }
     }

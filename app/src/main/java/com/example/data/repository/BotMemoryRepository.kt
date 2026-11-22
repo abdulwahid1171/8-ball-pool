@@ -58,6 +58,21 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
                     actionIntervalMs = 450L
                 )
             )
+        } else {
+            // Auto-repair legacy/drifted 8-Ball Pool profile so shot/physics engine runs cleanly
+            existing.filter {
+                it.targetPackage.contains("eightballpool", ignoreCase = true) &&
+                    it.botMode != "POOL_AIM" &&
+                    it.physicsSamplesCount == 0
+            }.forEach { poolProfile ->
+                dao.updateProfile(
+                    poolProfile.copy(
+                        botMode = "POOL_AIM",
+                        isLandscapeGame = true,
+                        updatedAt = System.currentTimeMillis()
+                    )
+                )
+            }
         }
     }
 
