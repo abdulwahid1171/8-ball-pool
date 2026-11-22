@@ -5,6 +5,7 @@ import android.graphics.Color
 import com.example.data.db.TrainingProfileEntity
 import kotlin.math.PI
 import kotlin.math.abs
+import kotlin.math.acos
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
@@ -42,7 +43,8 @@ data class PlannedPoolShot(
     val totalDistance: Float,
     val basePowerFraction: Float,
     val stateHash: String,
-    val stateSummary: String
+    val stateSummary: String,
+    val isBankShot: Boolean = false
 )
 
 data class PoolFrameAnalysis(
@@ -61,7 +63,9 @@ data class PoolFrameAnalysis(
     val pockets: List<PoolPocket>,
     val plannedShot: PlannedPoolShot?,
     val visionGrid: List<Float>,
-    val summary: String
+    val summary: String,
+    val detectedTableBounds: List<Float> = listOf(0.192f, 0.222f, 0.798f, 0.908f),
+    val aspectRatio: Float = 2.0f
 ) {
     val allTableTargets: List<DetectedBall>
         get() = targetBalls + listOfNotNull(eightBall)
@@ -69,10 +73,15 @@ data class PoolFrameAnalysis(
 
 /**
  * Computer-vision analyzer for Pool / Billiards mobile game screenshots and
- * live MediaProjection frames. Reads the table felt, detects Cue Ball, Solids vs Stripes
- * Target Balls, 8-Ball, Left vs Right Player Turn Border, and Top HUD Ball Racks.
+ * live MediaProjection frames.
+ * - Visually detects the inner felt borders (cushion rails) & snaps the 6 black pocket mouths.
+ * - Performs all shot vectors, ghost-ball offsets, pocket jaw cones, and cushion bank shots
+ *   in aspect-corrected isotropic coordinates so diagonal and vertical shots are accurate.
+ * - Classifies Solids vs Stripes vs 8-Ball and Left/Right turn ownership.
  */
 object PoolVisionAnalyzer {
+
+    private const val BALL_RADIUS_ISO = 0.017f
 
     private data class RackScanResult(
         val occupiedSlots: Int,
@@ -84,26 +93,19 @@ object PoolVisionAnalyzer {
         bitmap: Bitmap,
         profile: TrainingProfileEntity,
         seatOverride: String? = null,
-        suitOverride: String? = null
+        suitOverride: String? = null,
+        failedShotPenalties: Map<String, Float> = emptyMap()
     ): PoolFrameAnalysis {
         val w = bitmap.width.coerceAtLeast(1)
         val h = bitmap.height.coerceAtLeast(1)
+        val aspectRatio = (w.toFloat() / h.toFloat()).coerceIn(0.45f, 2.50f)
 
         val tLeft = profile.tableLeft.coerceIn(0.05f, 0.45f)
         val tTop = profile.tableTop.coerceIn(0.05f, 0.45f)
         val tRight = profile.tableRight.coerceIn(tLeft + 0.25f, 0.96f)
         val tBottom = profile.tableBottom.coerceIn(tTop + 0.25f, 0.98f)
 
-        val pockets = listOf(
-            PoolPocket("TL", tLeft + 0.030f, tTop + 0.040f),
-            PoolPocket("TM", (tLeft + tRight) * 0.5f, tTop + 0.032f),
-            PoolPocket("TR", tRight - 0.030f, tTop + 0.040f),
-            PoolPocket("BL", tLeft + 0.030f, tBottom - 0.040f),
-            PoolPocket("BM", (tLeft + tRight) * 0.5f, tBottom - 0.032f),
-            PoolPocket("BR", tRight - 0.030f, tBottom - 0.040f)
-        )
-
-        // 1. Strict Left vs Right Player Turn Ownership (no power-bar false-positive override)
+        // 1. Strict Left vs Right Player Turn Ownership
         val leftGreenRatio = measureGreenBorderRatio(bitmap, profile.turnBoxX, profile.turnBoxY)
         val opponentTurnX = (1.0f - profile.turnBoxX).coerceIn(0.50f, 0.85f)
         val rightGreenRatio = measureGreenBorderRatio(bitmap, opponentTurnX, profile.turnBoxY)
@@ -119,10 +121,10 @@ object PoolVisionAnalyzer {
         val isMyTurn = when (effectiveSeat) {
             "LEFT" -> turnOwner == TurnOwner.LEFT_PLAYER
             "RIGHT" -> turnOwner == TurnOwner.RIGHT_PLAYER
-            else -> false // WATCH mode never takes turns
+            else -> false
         }
 
-        // 2. Scan Left & Right Top HUD Racks to classify assigned suit (OPEN / SOLIDS / STRIPES / EIGHT_BALL)
+        // 2. Scan Left & Right Top HUD Racks to classify assigned suit
         val leftRack = scanHudRack(
             bitmap = bitmap,
             leftX = profile.pottedBarLeft,
@@ -149,22 +151,28 @@ object PoolVisionAnalyzer {
             else -> detectedSuit
         }
 
-        val greenTurnRatio = when (effectiveSeat) {
-            "RIGHT" -> rightGreenRatio
-            else -> leftGreenRatio
-        }
+        val greenTurnRatio = if (effectiveSeat == "RIGHT") rightGreenRatio else leftGreenRatio
         val pottedRatio = botRack.occupiedRatio
 
-        // Inner felt boundaries (exclude wooden rails & outer pockets)
-        val fLeft = (tLeft + 0.032f).coerceAtMost(tRight - 0.20f)
-        val fRight = (tRight - 0.032f).coerceAtLeast(fLeft + 0.20f)
-        val fTop = (tTop + 0.042f).coerceAtMost(tBottom - 0.20f)
-        val fBottom = (tBottom - 0.042f).coerceAtLeast(fTop + 0.20f)
+        // 3. Estimate table felt color & visually detect inner cushion borders + 6 black pocket holes
+        val seedFLeft = (tLeft + 0.032f).coerceAtMost(tRight - 0.20f)
+        val seedFRight = (tRight - 0.032f).coerceAtLeast(seedFLeft + 0.20f)
+        val seedFTop = (tTop + 0.042f).coerceAtMost(tBottom - 0.20f)
+        val seedFBottom = (tBottom - 0.042f).coerceAtLeast(seedFTop + 0.20f)
 
-        // 3. Estimate table felt color using median of 9 interior table points
-        val feltHsv = estimateFeltColorHsv(bitmap, fLeft, fTop, fRight, fBottom)
+        val feltHsv = estimateFeltColorHsv(bitmap, seedFLeft, seedFTop, seedFRight, seedFBottom)
+        val (fLeft, fTop, fRight, fBottom) = detectInnerFeltBorders(
+            bitmap = bitmap,
+            feltHsv = feltHsv,
+            seedLeft = seedFLeft,
+            seedTop = seedFTop,
+            seedRight = seedFRight,
+            seedBottom = seedFBottom
+        )
 
-        // 4. Scan interior felt on a 96x54 grid (handles 20:9 / 16:9 mobile screens cleanly)
+        val pockets = detectSixPockets(bitmap, fLeft, fTop, fRight, fBottom)
+
+        // 4. Scan interior felt on a 96x54 grid
         val cols = 96
         val rows = 54
         val totalCells = cols * rows
@@ -188,7 +196,8 @@ object PoolVisionAnalyzer {
                 cellSat[idx] = hsv[1]
                 cellLum[idx] = hsv[2]
 
-                val nearPocket = pockets.any { hypot(nx - it.normX, ny - it.normY) < 0.036f }
+                // Exclude pixels inside visually localized dark pocket holes
+                val nearPocket = pockets.any { isoDist(nx, ny, it.normX, it.normY, aspectRatio) < 0.042f }
                 if (nearPocket) continue
 
                 val hueDiff = abs(hsv[0] - feltHsv[0]).let { minOf(it, 360f - it) }
@@ -217,21 +226,21 @@ object PoolVisionAnalyzer {
             fBottom = fBottom
         )
 
-        // Mask out ONLY the cue ball before clustering colored, striped, and 8 balls
+        // Mask out ONLY the cue ball in true isotropic circle
         val visited = BooleanArray(totalCells)
         if (cueBall != null) {
             for (r in 0 until rows) {
                 val ny = fTop + ((r + 0.5f) / rows) * (fBottom - fTop)
                 for (c in 0 until cols) {
                     val nx = fLeft + ((c + 0.5f) / cols) * (fRight - fLeft)
-                    if (hypot(nx - cueBall.normX, ny - cueBall.normY) < 0.028f) {
+                    if (isoDist(nx, ny, cueBall.normX, cueBall.normY, aspectRatio) < 0.032f) {
                         visited[r * cols + c] = true
                     }
                 }
             }
         }
 
-        // Preserve both vivid colored regions AND bright white stripe bands so striped balls form single clusters
+        // Preserve both vivid colored regions AND bright white stripe bands
         val filteredBallCell = BooleanArray(totalCells)
         for (r in 1 until rows - 1) {
             for (c in 1 until cols - 1) {
@@ -323,8 +332,8 @@ object PoolVisionAnalyzer {
                 val normX = fLeft + ((centerCol + 0.5f) / cols) * (fRight - fLeft)
                 val normY = fTop + ((centerRow + 0.5f) / rows) * (fBottom - fTop)
 
-                val tooCloseToCue = cueBall != null && hypot(normX - cueBall.normX, normY - cueBall.normY) < 0.025f
-                val tooCloseToExisting = detectedTargets.any { hypot(normX - it.normX, normY - it.normY) < 0.024f }
+                val tooCloseToCue = cueBall != null && isoDist(normX, normY, cueBall.normX, cueBall.normY, aspectRatio) < 0.030f
+                val tooCloseToExisting = detectedTargets.any { isoDist(normX, normY, it.normX, it.normY, aspectRatio) < 0.028f }
                 if (!tooCloseToCue && !tooCloseToExisting) {
                     val mLum = avgLum / count
                     val mSat = avgSat / count
@@ -361,7 +370,9 @@ object PoolVisionAnalyzer {
             fTop = fTop,
             fRight = fRight,
             fBottom = fBottom,
-            allObstacles = obstacleBalls
+            allObstacles = obstacleBalls,
+            aspectRatio = aspectRatio,
+            failedShotPenalties = failedShotPenalties
         )
 
         val visionGrid = build6x6VisionGrid(bitmap, fLeft, fTop, fRight, fBottom, cueBall, allColoredTargets)
@@ -372,7 +383,7 @@ object PoolVisionAnalyzer {
             effectiveSeat == "WATCH" -> "WATCH(${turnOwner.name.take(1)})"
             isMyTurn -> "BOT TURN"
             turnOwner != TurnOwner.NONE -> "HUMAN TURN"
-            else -> "ROLLING/WAIT"
+            else -> "WAIT"
         }
 
         val summary = buildString {
@@ -381,7 +392,8 @@ object PoolVisionAnalyzer {
             append(" | Cue:${if (cueBall != null) "OK" else "N/A"}")
             append(" | S:$solidsCount St:$stripesCount")
             if (planned != null) {
-                append(" | ${planned.targetBall.suit.name.take(3)}->${planned.pocket.id} (${planned.cutAngleDeg.toInt()}°)")
+                val bankTag = if (planned.isBankShot) " [BANK]" else ""
+                append(" | ${planned.targetBall.suit.name.take(3)}->${planned.pocket.id} (${planned.cutAngleDeg.toInt()}°)$bankTag")
             }
         }
 
@@ -401,8 +413,145 @@ object PoolVisionAnalyzer {
             pockets = pockets,
             plannedShot = planned,
             visionGrid = visionGrid,
-            summary = summary
+            summary = summary,
+            detectedTableBounds = listOf(fLeft, fTop, fRight, fBottom),
+            aspectRatio = aspectRatio
         )
+    }
+
+    private fun detectInnerFeltBorders(
+        bitmap: Bitmap,
+        feltHsv: FloatArray,
+        seedLeft: Float,
+        seedTop: Float,
+        seedRight: Float,
+        seedBottom: Float
+    ): List<Float> {
+        val w = bitmap.width
+        val h = bitmap.height
+        val hsv = FloatArray(3)
+
+        fun isFeltPixel(nx: Float, ny: Float): Boolean {
+            val px = (nx * w).toInt().coerceIn(0, w - 1)
+            val py = (ny * h).toInt().coerceIn(0, h - 1)
+            Color.colorToHSV(bitmap.getPixel(px, py), hsv)
+            val hueDiff = abs(hsv[0] - feltHsv[0]).let { minOf(it, 360f - it) }
+            val satDiff = abs(hsv[1] - feltHsv[1])
+            val valDiff = abs(hsv[2] - feltHsv[2])
+            return hueDiff < 26f && satDiff < 0.30f && valDiff < 0.30f
+        }
+
+        val midX = (seedLeft + seedRight) * 0.5f
+        val midY = (seedTop + seedBottom) * 0.5f
+
+        fun scanEdgeX(startX: Float, endX: Float, step: Float): Float? {
+            val ys = listOf(0.35f, 0.45f, 0.56f, 0.67f, 0.78f)
+            val hits = mutableListOf<Float>()
+            for (y in ys) {
+                var x = startX
+                var nonFeltRun = 0
+                while (if (step > 0) x <= endX else x >= endX) {
+                    if (!isFeltPixel(x, y)) {
+                        nonFeltRun++
+                        if (nonFeltRun >= 2) {
+                            hits.add(x - step)
+                            break
+                        }
+                    } else {
+                        nonFeltRun = 0
+                    }
+                    x += step
+                }
+            }
+            if (hits.size < 3) return null
+            hits.sort()
+            return hits[hits.size / 2]
+        }
+
+        fun scanEdgeY(startY: Float, endY: Float, step: Float): Float? {
+            val xs = listOf(0.32f, 0.42f, 0.50f, 0.58f, 0.68f)
+            val hits = mutableListOf<Float>()
+            for (x in xs) {
+                var y = startY
+                var nonFeltRun = 0
+                while (if (step > 0) y <= endY else y >= endY) {
+                    if (!isFeltPixel(x, y)) {
+                        nonFeltRun++
+                        if (nonFeltRun >= 2) {
+                            hits.add(y - step)
+                            break
+                        }
+                    } else {
+                        nonFeltRun = 0
+                    }
+                    y += step
+                }
+            }
+            if (hits.size < 3) return null
+            hits.sort()
+            return hits[hits.size / 2]
+        }
+
+        val detLeft = scanEdgeX(midX - 0.14f, (seedLeft - 0.04f).coerceAtLeast(0.08f), -0.004f)
+            ?.coerceIn(seedLeft - 0.035f, seedLeft + 0.035f) ?: seedLeft
+        val detRight = scanEdgeX(midX + 0.14f, (seedRight + 0.04f).coerceAtMost(0.92f), +0.004f)
+            ?.coerceIn(seedRight - 0.035f, seedRight + 0.035f) ?: seedRight
+        val detTop = scanEdgeY(midY - 0.14f, (seedTop - 0.04f).coerceAtLeast(0.12f), -0.005f)
+            ?.coerceIn(seedTop - 0.035f, seedTop + 0.035f) ?: seedTop
+        val detBottom = scanEdgeY(midY + 0.14f, (seedBottom + 0.04f).coerceAtMost(0.97f), +0.005f)
+            ?.coerceIn(seedBottom - 0.035f, seedBottom + 0.035f) ?: seedBottom
+
+        return listOf(
+            detLeft.coerceAtMost(detRight - 0.25f),
+            detTop.coerceAtMost(detBottom - 0.25f),
+            detRight.coerceAtLeast(detLeft + 0.25f),
+            detBottom.coerceAtLeast(detTop + 0.25f)
+        )
+    }
+
+    private fun detectSixPockets(
+        bitmap: Bitmap,
+        fLeft: Float,
+        fTop: Float,
+        fRight: Float,
+        fBottom: Float
+    ): List<PoolPocket> {
+        val w = bitmap.width
+        val h = bitmap.height
+        val hsv = FloatArray(3)
+        val seeds = listOf(
+            PoolPocket("TL", fLeft + 0.006f, fTop + 0.010f),
+            PoolPocket("TM", (fLeft + fRight) * 0.5f, fTop - 0.004f),
+            PoolPocket("TR", fRight - 0.006f, fTop + 0.010f),
+            PoolPocket("BL", fLeft + 0.006f, fBottom - 0.010f),
+            PoolPocket("BM", (fLeft + fRight) * 0.5f, fBottom + 0.004f),
+            PoolPocket("BR", fRight - 0.006f, fBottom - 0.010f)
+        )
+
+        return seeds.map { seed ->
+            var sumX = 0f
+            var sumY = 0f
+            var darkCount = 0
+            for (dyIdx in -4..4) {
+                val ny = (seed.normY + dyIdx * 0.005f).coerceIn(0.05f, 0.98f)
+                val py = (ny * h).toInt().coerceIn(0, h - 1)
+                for (dxIdx in -4..4) {
+                    val nx = (seed.normX + dxIdx * 0.003f).coerceIn(0.05f, 0.96f)
+                    val px = (nx * w).toInt().coerceIn(0, w - 1)
+                    Color.colorToHSV(bitmap.getPixel(px, py), hsv)
+                    if (hsv[2] < 0.16f && hsv[1] < 0.55f) {
+                        sumX += nx
+                        sumY += ny
+                        darkCount++
+                    }
+                }
+            }
+            if (darkCount >= 5) {
+                PoolPocket(seed.id, sumX / darkCount, sumY / darkCount)
+            } else {
+                seed
+            }
+        }
     }
 
     fun filterLegalTargets(
@@ -415,7 +564,6 @@ object PoolVisionAnalyzer {
         return when (effectiveSuit) {
             AssignedSuit.SOLIDS -> {
                 solids.ifEmpty {
-                    // Only shoot 8-ball if no opponent stripes or solids remain unclear; avoid hitting enemy stripes!
                     if (stripes.isEmpty()) listOfNotNull(eightBall) else emptyList()
                 }
             }
@@ -436,7 +584,6 @@ object PoolVisionAnalyzer {
         if (botRack.occupiedSlots == 0 && oppRack.occupiedSlots >= 1) {
             return AssignedSuit.EIGHT_BALL
         }
-        // Positive isStripesScore => stripes; negative => solids
         val diff = botRack.isStripesScore - oppRack.isStripesScore
         return when {
             botRack.isStripesScore >= 0.35f || diff >= 0.25f -> AssignedSuit.STRIPES
@@ -576,14 +723,33 @@ object PoolVisionAnalyzer {
         return DetectedBall(normX, normY, DetectedBallKind.CUE, bestColor, BallSuit.UNKNOWN)
     }
 
-    fun computeAimPointWithTrim(shot: PlannedPoolShot, angleTrimDeg: Float): Pair<Float, Float> {
-        val dx = shot.aimPointX - shot.cueBall.normX
-        val dy = shot.aimPointY - shot.cueBall.normY
+    /**
+     * Rotates the cue->aimPoint ray in true isotropic screen space by [angleTrimDeg] and
+     * projects the aim tap out to a safe minimum distance along the ray so micro-pixel touch rounding
+     * never causes huge angle error or clicks the cue-ball move handle.
+     */
+    fun computeAimPointWithTrim(
+        shot: PlannedPoolShot,
+        angleTrimDeg: Float,
+        aspectRatio: Float = 2.0f,
+        fLeft: Float = 0.18f,
+        fTop: Float = 0.20f,
+        fRight: Float = 0.82f,
+        fBottom: Float = 0.92f
+    ): Pair<Float, Float> {
+        val isoDx = (shot.aimPointX - shot.cueBall.normX) * aspectRatio
+        val isoDy = shot.aimPointY - shot.cueBall.normY
+        val len = hypot(isoDx, isoDy).coerceAtLeast(0.01f)
         val rad = angleTrimDeg * (PI / 180.0)
-        val rx = (dx * cos(rad) - dy * sin(rad)).toFloat()
-        val ry = (dx * sin(rad) + dy * cos(rad)).toFloat()
-        return (shot.cueBall.normX + rx).coerceIn(0.18f, 0.82f) to
-            (shot.cueBall.normY + ry).coerceIn(0.20f, 0.92f)
+        val rxIso = (isoDx * cos(rad) - isoDy * sin(rad)).toFloat()
+        val ryIso = (isoDx * sin(rad) + isoDy * cos(rad)).toFloat()
+
+        // Ensure tap is at least 0.12 isotropic units away along aim ray (or exact ghost if farther), clamped inside rails
+        val targetRayDist = maxOf(len, 0.12f)
+        val scale = targetRayDist / len
+        val tapX = (shot.cueBall.normX + (rxIso * scale) / aspectRatio).coerceIn(fLeft + 0.01f, fRight - 0.01f)
+        val tapY = (shot.cueBall.normY + (ryIso * scale)).coerceIn(fTop + 0.01f, fBottom - 0.01f)
+        return tapX to tapY
     }
 
     fun computeBestShot(
@@ -594,98 +760,250 @@ object PoolVisionAnalyzer {
         fTop: Float,
         fRight: Float,
         fBottom: Float,
-        allObstacles: List<DetectedBall> = targets
+        allObstacles: List<DetectedBall> = targets,
+        aspectRatio: Float = 2.0f,
+        failedShotPenalties: Map<String, Float> = emptyMap()
     ): PlannedPoolShot? {
         if (cue == null || targets.isEmpty()) return null
 
         var bestScore = Float.NEGATIVE_INFINITY
         var bestShot: PlannedPoolShot? = null
-        val ballRadiusNorm = 0.017f
+
+        val marginX = 0.008f / aspectRatio
+        val marginY = 0.008f
 
         for (target in targets) {
-            val ctDx = target.normX - cue.normX
-            val ctDy = target.normY - cue.normY
-            val ctDist = hypot(ctDx, ctDy)
-            if (ctDist < 0.02f) continue
+            val ctIsoDx = (target.normX - cue.normX) * aspectRatio
+            val ctIsoDy = target.normY - cue.normY
+            val ctDist = hypot(ctIsoDx, ctIsoDy)
+            if (ctDist < 0.028f) continue
 
             for (pocket in pockets) {
-                val tpDx = pocket.normX - target.normX
-                val tpDy = pocket.normY - target.normY
-                val tpDist = hypot(tpDx, tpDy)
-                if (tpDist < 0.02f) continue
+                val tpIsoDx = (pocket.normX - target.normX) * aspectRatio
+                val tpIsoDy = pocket.normY - target.normY
+                val tpDist = hypot(tpIsoDx, tpIsoDy)
+                if (tpDist < 0.028f) continue
 
-                val dot = ((ctDx / ctDist) * (tpDx / tpDist) + (ctDy / ctDist) * (tpDy / tpDist)).coerceIn(-1f, 1f)
-                val cutAngleRad = kotlin.math.acos(dot)
-                val cutAngleDeg = (cutAngleRad * 180.0 / PI).toFloat()
+                val dot = ((ctIsoDx / ctDist) * (tpIsoDx / tpDist) + (ctIsoDy / ctDist) * (tpIsoDy / tpDist)).coerceIn(-1f, 1f)
+                val cutAngleDeg = (acos(dot) * 180.0 / PI).toFloat()
+                if (cutAngleDeg > 66f) continue
 
-                if (cutAngleDeg > 68f) continue
+                // Pocket Jaw Acceptance Cone: prevent shallow rail shots that clip pocket knuckles
+                val (jawX, jawY) = pocketEntryVector(pocket.id)
+                val jawDot = ((tpIsoDx / tpDist) * jawX + (tpIsoDy / tpDist) * jawY).coerceIn(-1f, 1f)
+                val jawAngleDeg = (acos(jawDot) * 180.0 / PI).toFloat()
+                val maxJawDeg = if (pocket.id == "TM" || pocket.id == "BM") 50f else 58f
+                if (jawAngleDeg > maxJawDeg) continue
 
-                val ghostX = (target.normX - (tpDx / tpDist) * (ballRadiusNorm * 1.9f)).coerceIn(fLeft, fRight)
-                val ghostY = (target.normY - (tpDy / tpDist) * (ballRadiusNorm * 1.9f)).coerceIn(fTop, fBottom)
+                // Isotropic Ghost-Ball placement (diameter = 2 * BALL_RADIUS_ISO = 0.034f)
+                val ghostIsoX = (target.normX * aspectRatio) - (tpIsoDx / tpDist) * (BALL_RADIUS_ISO * 2.0f)
+                val ghostIsoY = target.normY - (tpIsoDy / tpDist) * (BALL_RADIUS_ISO * 2.0f)
+                val ghostX = ghostIsoX / aspectRatio
+                val ghostY = ghostIsoY
 
-                // Penalize shots where cue->ghost or target->pocket passes directly through another ball (especially 8-ball)
+                // Reject ghost points buried inside or behind cushion rails
+                if (ghostX < fLeft + marginX || ghostX > fRight - marginX ||
+                    ghostY < fTop + marginY || ghostY > fBottom - marginY
+                ) {
+                    continue
+                }
+
+                // Obstacle ray check in true isotropic space
                 var blockerPenalty = 0f
                 for (obs in allObstacles) {
-                    val isTargetItself = hypot(obs.normX - target.normX, obs.normY - target.normY) < 0.015f
-                    if (isTargetItself) continue
-                    val distCuePath = pointToSegmentDistance(
+                    if (isoDist(obs.normX, obs.normY, target.normX, target.normY, aspectRatio) < 0.022f) continue
+                    val distCuePath = pointToSegmentDistanceIso(
                         obs.normX, obs.normY,
                         cue.normX, cue.normY,
-                        ghostX, ghostY
+                        ghostX, ghostY,
+                        aspectRatio
                     )
-                    val distTargetPath = pointToSegmentDistance(
+                    val distTargetPath = pointToSegmentDistanceIso(
                         obs.normX, obs.normY,
                         target.normX, target.normY,
-                        pocket.normX, pocket.normY
+                        pocket.normX, pocket.normY,
+                        aspectRatio
                     )
-                    if (distCuePath < 0.026f || distTargetPath < 0.026f) {
-                        blockerPenalty += if (obs.kind == DetectedBallKind.EIGHT_BALL) 85f else 55f
+                    if (distCuePath < BALL_RADIUS_ISO * 1.95f || distTargetPath < BALL_RADIUS_ISO * 1.95f) {
+                        blockerPenalty += if (obs.kind == DetectedBallKind.EIGHT_BALL) 90f else 62f
                     }
                 }
 
+                // Scratch guard: avoid straight-in high-velocity follow where cue directly trails into pocket
+                val scratchRiskPenalty = if (cutAngleDeg < 7f && abs(jawAngleDeg) < 12f && tpDist < 0.28f) 8f else 0f
+
+                val angleBucket = (cutAngleDeg / 15f).toInt().coerceIn(0, 4)
+                val distBucket = (ctDist + tpDist).let { (it * 3.5f).toInt().coerceIn(0, 4) }
+                val stateHash = "POOL_A${angleBucket}_D${distBucket}_${pocket.id}"
+                val priorFailPenalty = failedShotPenalties[stateHash] ?: 0f
+
                 val totalDist = ctDist + tpDist
-                val geomScore = (90f - cutAngleDeg) * 1.4f - totalDist * 45f - blockerPenalty
+                val geomScore = (90f - cutAngleDeg) * 1.45f -
+                    totalDist * 30f -
+                    jawAngleDeg * 0.35f -
+                    blockerPenalty -
+                    scratchRiskPenalty -
+                    priorFailPenalty
 
                 if (geomScore > bestScore) {
                     bestScore = geomScore
-                    val angleBucket = (cutAngleDeg / 15f).toInt().coerceIn(0, 4)
-                    val distBucket = (totalDist * 5f).toInt().coerceIn(0, 4)
-                    val basePower = (0.40f + totalDist * 0.50f + (cutAngleDeg / 180f) * 0.14f).coerceIn(0.32f, 0.90f)
-                    val stateHash = "POOL_A${angleBucket}_D${distBucket}_${pocket.id}"
+                    val basePower = (0.38f + totalDist * 0.36f + (cutAngleDeg / 180f) * 0.14f).coerceIn(0.32f, 0.88f)
                     bestShot = PlannedPoolShot(
                         cueBall = cue,
                         targetBall = target,
                         pocket = pocket,
-                        aimPointX = ghostX,
-                        aimPointY = ghostY,
+                        aimPointX = ghostX.coerceIn(fLeft, fRight),
+                        aimPointY = ghostY.coerceIn(fTop, fBottom),
                         cutAngleDeg = cutAngleDeg,
                         totalDistance = totalDist,
                         basePowerFraction = basePower,
                         stateHash = stateHash,
-                        stateSummary = "Cut ${cutAngleDeg.toInt()}° | ${target.suit.name} | Dist ${"%.2f".format(totalDist)} -> ${pocket.id}"
+                        stateSummary = "Cut ${cutAngleDeg.toInt()}° | ${target.suit.name} | Dist ${"%.2f".format(totalDist)} -> ${pocket.id}",
+                        isBankShot = false
                     )
                 }
+            }
+        }
+
+        // If all direct cuts were heavily blocked (geomScore < -20f) or null, evaluate 1-Cushion Bank Shots
+        if (bestShot == null || bestScore < -15f) {
+            val bank = computeOneCushionBankShot(
+                cue = cue,
+                targets = targets,
+                pockets = pockets,
+                fLeft = fLeft,
+                fTop = fTop,
+                fRight = fRight,
+                fBottom = fBottom,
+                allObstacles = allObstacles,
+                aspectRatio = aspectRatio,
+                failedShotPenalties = failedShotPenalties
+            )
+            if (bank != null && (bestShot == null || bestScore < -15f)) {
+                return bank
             }
         }
         return bestShot
     }
 
-    private fun pointToSegmentDistance(
+    private fun computeOneCushionBankShot(
+        cue: DetectedBall,
+        targets: List<DetectedBall>,
+        pockets: List<PoolPocket>,
+        fLeft: Float,
+        fTop: Float,
+        fRight: Float,
+        fBottom: Float,
+        allObstacles: List<DetectedBall>,
+        aspectRatio: Float,
+        failedShotPenalties: Map<String, Float>
+    ): PlannedPoolShot? {
+        var bestScore = Float.NEGATIVE_INFINITY
+        var bestBank: PlannedPoolShot? = null
+
+        for (target in targets) {
+            val ctIsoDx = (target.normX - cue.normX) * aspectRatio
+            val ctIsoDy = target.normY - cue.normY
+            val ctDist = hypot(ctIsoDx, ctIsoDy)
+            if (ctDist < 0.03f) continue
+
+            // Reflect pockets across Top and Bottom cushions (classic cross-table banks)
+            val mirrorRails = listOf(
+                Pair("TOP", fTop),
+                Pair("BOT", fBottom)
+            )
+            for ((_, railY) in mirrorRails) {
+                for (pocket in pockets) {
+                    val mirroredY = 2f * railY - pocket.normY
+                    val tpIsoDx = (pocket.normX - target.normX) * aspectRatio
+                    val tpIsoDy = mirroredY - target.normY
+                    val tpDist = hypot(tpIsoDx, tpIsoDy)
+                    if (tpDist < 0.04f) continue
+
+                    val dot = ((ctIsoDx / ctDist) * (tpIsoDx / tpDist) + (ctIsoDy / ctDist) * (tpIsoDy / tpDist)).coerceIn(-1f, 1f)
+                    val cutAngleDeg = (acos(dot) * 180.0 / PI).toFloat()
+                    if (cutAngleDeg > 38f) continue
+
+                    val ghostX = ((target.normX * aspectRatio) - (tpIsoDx / tpDist) * (BALL_RADIUS_ISO * 2.0f)) / aspectRatio
+                    val ghostY = target.normY - (tpIsoDy / tpDist) * (BALL_RADIUS_ISO * 2.0f)
+                    if (ghostX !in fLeft..fRight || ghostY !in fTop..fBottom) continue
+
+                    var blocked = false
+                    for (obs in allObstacles) {
+                        if (isoDist(obs.normX, obs.normY, target.normX, target.normY, aspectRatio) < 0.022f) continue
+                        if (pointToSegmentDistanceIso(obs.normX, obs.normY, cue.normX, cue.normY, ghostX, ghostY, aspectRatio) < BALL_RADIUS_ISO * 1.9f) {
+                            blocked = true
+                            break
+                        }
+                    }
+                    if (blocked) continue
+
+                    val totalDist = ctDist + tpDist
+                    val angleBucket = (cutAngleDeg / 15f).toInt().coerceIn(0, 4)
+                    val distBucket = (totalDist * 3.5f).toInt().coerceIn(0, 4)
+                    val stateHash = "POOL_A${angleBucket}_D${distBucket}_${pocket.id}"
+                    val penalty = failedShotPenalties[stateHash] ?: 0f
+                    val score = (80f - cutAngleDeg * 1.8f) - totalDist * 28f - penalty
+
+                    if (score > bestScore) {
+                        bestScore = score
+                        bestBank = PlannedPoolShot(
+                            cueBall = cue,
+                            targetBall = target,
+                            pocket = pocket,
+                            aimPointX = ghostX,
+                            aimPointY = ghostY,
+                            cutAngleDeg = cutAngleDeg,
+                            totalDistance = totalDist,
+                            basePowerFraction = (0.50f + totalDist * 0.28f).coerceIn(0.45f, 0.90f),
+                            stateHash = stateHash,
+                            stateSummary = "Bank ${cutAngleDeg.toInt()}° | ${target.suit.name} -> ${pocket.id}",
+                            isBankShot = true
+                        )
+                    }
+                }
+            }
+        }
+        return bestBank
+    }
+
+    private fun pocketEntryVector(pocketId: String): Pair<Float, Float> {
+        val invSqrt2 = 0.70710677f
+        return when (pocketId) {
+            "TL" -> -invSqrt2 to -invSqrt2
+            "TR" -> +invSqrt2 to -invSqrt2
+            "BL" -> -invSqrt2 to +invSqrt2
+            "BR" -> +invSqrt2 to +invSqrt2
+            "TM" -> 0f to -1f
+            "BM" -> 0f to +1f
+            else -> 0f to 1f
+        }
+    }
+
+    private fun isoDist(ax: Float, ay: Float, bx: Float, by: Float, aspectRatio: Float): Float {
+        return hypot((ax - bx) * aspectRatio, ay - by)
+    }
+
+    private fun pointToSegmentDistanceIso(
         px: Float,
         py: Float,
         ax: Float,
         ay: Float,
         bx: Float,
-        by: Float
+        by: Float,
+        aspectRatio: Float
     ): Float {
-        val abx = bx - ax
+        val pxI = px * aspectRatio
+        val axI = ax * aspectRatio
+        val bxI = bx * aspectRatio
+        val abx = bxI - axI
         val aby = by - ay
         val lenSq = abx * abx + aby * aby
-        if (lenSq < 1e-6f) return hypot(px - ax, py - ay)
-        val t = (((px - ax) * abx + (py - ay) * aby) / lenSq).coerceIn(0.05f, 0.95f)
-        val projX = ax + t * abx
+        if (lenSq < 1e-6f) return hypot(pxI - axI, py - ay)
+        val t = (((pxI - axI) * abx + (py - ay) * aby) / lenSq).coerceIn(0.05f, 0.95f)
+        val projX = axI + t * abx
         val projY = ay + t * aby
-        return hypot(px - projX, py - projY)
+        return hypot(pxI - projX, py - projY)
     }
 
     private fun estimateFeltColorHsv(

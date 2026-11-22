@@ -97,10 +97,27 @@ class ExampleUnitTest {
             fTop = 0.20f,
             fRight = 0.81f,
             fBottom = 0.92f,
-            allObstacles = listOf(blockedSolid, clearSolid, blockerStripe, eightBall)
+            allObstacles = listOf(blockedSolid, clearSolid, blockerStripe, eightBall),
+            aspectRatio = 2.0f
         )
         assertNotNull(planned)
         assertEquals("TR", planned!!.pocket.id)
+
+        // Verify failed-shot penalty pushes bot to avoid repeating a previously failed pocket/state
+        val penalized = PoolVisionAnalyzer.computeBestShot(
+            cue = cue,
+            targets = listOf(blockedSolid, clearSolid),
+            pockets = pockets,
+            fLeft = 0.18f,
+            fTop = 0.20f,
+            fRight = 0.81f,
+            fBottom = 0.92f,
+            allObstacles = listOf(blockedSolid, clearSolid),
+            aspectRatio = 2.0f,
+            failedShotPenalties = mapOf(planned.stateHash to 80f)
+        )
+        assertNotNull(penalized)
+        assertEquals("TL", penalized!!.pocket.id)
     }
 
     @Test
@@ -137,6 +154,24 @@ class ExampleUnitTest {
         )
         assertEquals(profile.learnedFrictionCoef, zeroOutcome.updatedProfile.learnedFrictionCoef, 0.0001f)
         assertEquals(profile.learnedPowerScale, zeroOutcome.updatedProfile.learnedPowerScale, 0.0001f)
+        assertEquals(1, zeroOutcome.updatedProfile.totalMistakesLogged)
+
+        // White cue ball scratch must classify explicitly as CUE_SCRATCH and increment scratchesCount
+        val scratchOutcome = PhysicsEstimator.evaluatePostShotPhysics(
+            profile = zeroOutcome.updatedProfile,
+            shotNumber = 2,
+            preShot = shot,
+            powerFraction = 0.75f,
+            angleTrimDeg = 0f,
+            postCueBall = null,
+            pottedBall = false,
+            keptTurn = false,
+            reward = -4.5f,
+            scratched = true
+        )
+        assertEquals("CUE_SCRATCH", scratchOutcome.outcomeLabel)
+        assertEquals(1, scratchOutcome.updatedProfile.scratchesCount)
+        assertEquals(2, scratchOutcome.updatedProfile.totalMistakesLogged)
 
         // Now test passive Human Shot Observation & Imitation Learning
         val pockets = listOf(

@@ -194,15 +194,27 @@ fun CalibratorScreen(
                                     style = Stroke(width = 2.dp.toPx())
                                 )
 
-                                // Detected balls + planned shot vector
+                                // Detected balls, auto-detected inner cushion border, & planned shot vector
                                 val analysis = screenshotState.poolAnalysis
                                 if (analysis != null) {
+                                    val db = analysis.detectedTableBounds
+                                    if (db.size == 4) {
+                                        drawRect(
+                                            color = AmberPulse.copy(alpha = 0.85f),
+                                            topLeft = Offset(db[0] * size.width, db[1] * size.height),
+                                            size = Size(
+                                                (db[2] - db[0]) * size.width,
+                                                (db[3] - db[1]) * size.height
+                                            ),
+                                            style = Stroke(width = 1.8.dp.toPx())
+                                        )
+                                    }
                                     analysis.pockets.forEach { pocket ->
                                         drawCircle(
-                                            color = CyanElectric.copy(alpha = 0.6f),
-                                            radius = 6.dp.toPx(),
+                                            color = CyanElectric.copy(alpha = 0.85f),
+                                            radius = 7.dp.toPx(),
                                             center = Offset(pocket.normX * size.width, pocket.normY * size.height),
-                                            style = Stroke(width = 1.5.dp.toPx())
+                                            style = Stroke(width = 2.dp.toPx())
                                         )
                                     }
                                     analysis.targetBalls.forEach { ball ->

@@ -134,6 +134,8 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
                 learnedCutBiasDeg = 0.0f,
                 physicsSamplesCount = 0,
                 humanShotsObserved = 0,
+                totalMistakesLogged = 0,
+                scratchesCount = 0,
                 explorationRate = 0.25f,
                 updatedAt = System.currentTimeMillis()
             )
@@ -170,7 +172,9 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
         sb.append("    \"learnedQPairs\": ${qEntries.size},\n")
         sb.append("    \"botSeat\": \"${profile?.botSeatSide ?: "LEFT"}\",\n")
         sb.append("    \"preferredSuit\": \"${profile?.preferredSuit ?: "AUTO"}\",\n")
-        sb.append("    \"humanShotsObserved\": ${profile?.humanShotsObserved ?: 0}\n")
+        sb.append("    \"humanShotsObserved\": ${profile?.humanShotsObserved ?: 0},\n")
+        sb.append("    \"mistakesLogged\": ${profile?.totalMistakesLogged ?: 0},\n")
+        sb.append("    \"scratchesCount\": ${profile?.scratchesCount ?: 0}\n")
         sb.append("  },\n")
         sb.append("  \"topQPolicies\": [\n")
         val topQ = qEntries.sortedByDescending { it.qValue }.take(12)
@@ -183,7 +187,7 @@ class BotMemoryRepository(private val dao: NeuroBotDao) {
         physicsLogs.forEachIndexed { idx, s ->
             val comma = if (idx < physicsLogs.lastIndex) "," else ""
             sb.append(
-                "    {\"shot\": ${s.shotNumber}, \"pocket\": \"${s.pocketId}\", \"cutDeg\": ${"%.1f".format(s.cutAngleDeg)}, " +
+                "    {\"shot\": ${s.shotNumber}, \"outcome\": \"${s.outcomeLabel}\", \"pocket\": \"${s.pocketId}\", \"cutDeg\": ${"%.1f".format(s.cutAngleDeg)}, " +
                     "\"power\": ${"%.2f".format(s.powerFraction)}, \"preCue\": [${"%.3f".format(s.preCueX)},${"%.3f".format(s.preCueY)}], " +
                     "\"postCue\": [${"%.3f".format(s.postCueX)},${"%.3f".format(s.postCueY)}], \"travel\": ${"%.3f".format(s.cueTravelDist)}, " +
                     "\"friction\": ${"%.3f".format(s.estimatedFriction)}, \"deflectErrDeg\": ${"%.1f".format(s.angleDeflectionErrorDeg)}, " +

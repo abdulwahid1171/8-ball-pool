@@ -15,7 +15,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
         TrainingSessionEntity::class,
         ShotPhysicsEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 abstract class NeuroBotDatabase : RoomDatabase() {
@@ -34,6 +34,14 @@ abstract class NeuroBotDatabase : RoomDatabase() {
             }
         }
 
+        val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE training_profiles ADD COLUMN totalMistakesLogged INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE training_profiles ADD COLUMN scratchesCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE shot_physics_logs ADD COLUMN outcomeLabel TEXT NOT NULL DEFAULT 'SETTLED'")
+            }
+        }
+
         fun getInstance(context: Context): NeuroBotDatabase {
             return INSTANCE ?: synchronized(this) {
                 INSTANCE ?: Room.databaseBuilder(
@@ -41,7 +49,7 @@ abstract class NeuroBotDatabase : RoomDatabase() {
                     NeuroBotDatabase::class.java,
                     "neurobot_memory.db"
                 )
-                    .addMigrations(MIGRATION_3_4)
+                    .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
                     .fallbackToDestructiveMigration(dropAllTables = true)
                     .build()
                     .also { INSTANCE = it }

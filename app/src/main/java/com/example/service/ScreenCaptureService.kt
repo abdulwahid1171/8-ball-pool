@@ -43,6 +43,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -89,6 +90,7 @@ class ScreenCaptureService : Service() {
     private var episodeStartMs = System.currentTimeMillis()
     private var staleFrames = 0
     private var humanPreShotAnalysis: PoolFrameAnalysis? = null
+    private val sessionFailedShotPenalties = ConcurrentHashMap<String, Float>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -288,6 +290,7 @@ class ScreenCaptureService : Service() {
             lastPerception = null
             lastAction = null
             humanPreShotAnalysis = null
+            sessionFailedShotPenalties.clear()
             if (initialProfile != null) {
                 BotServiceBridge.setHumanShotsObserved(initialProfile.humanShotsObserved)
             }
@@ -362,7 +365,8 @@ class ScreenCaptureService : Service() {
             bitmap = bitmap,
             profile = profile,
             seatOverride = telemetry.manualSeatSideOverride,
-            suitOverride = telemetry.manualSuitOverride
+            suitOverride = telemetry.manualSuitOverride,
+            failedShotPenalties = sessionFailedShotPenalties
         )
         bitmap.recycle()
 
@@ -439,7 +443,8 @@ class ScreenCaptureService : Service() {
                         bitmap = postBmp,
                         profile = profile,
                         seatOverride = telemetry.manualSeatSideOverride,
-                        suitOverride = telemetry.manualSuitOverride
+                        suitOverride = telemetry.manualSuitOverride,
+                        failedShotPenalties = sessionFailedShotPenalties
                     )
                     postBmp.recycle()
                     parsed
@@ -448,8 +453,13 @@ class ScreenCaptureService : Service() {
                 }
 
                 val humanKeptTurn = (postAnalysis.turnOwner == prevHuman.turnOwner)
-                val humanPotted = (postAnalysis.allTableTargets.size < prevHuman.allTableTargets.size) ||
-                    (humanKeptTurn && postAnalysis.pottedOccupiedRatio > prevHuman.pottedOccupiedRatio + 0.05f)
+                val humanScratched = postAnalysis.cueBall == null ||
+                    (!humanKeptTurn && postAnalysis.cueBall != null &&
+                        postAnalysis.pockets.any {
+                            hypot((postAnalysis.cueBall.normX - it.normX) * postAnalysis.aspectRatio, postAnalysis.cueBall.normY - it.normY) < 0.048f
+                        })
+                val humanPotted = !humanScratched && ((postAnalysis.allTableTargets.size < prevHuman.allTableTargets.size) ||
+                    (humanKeptTurn && postAnalysis.pottedOccupiedRatio > prevHuman.pottedOccupiedRatio + 0.05f))
 
                 val obs = PhysicsEstimator.evaluateHumanShotObservation(
                     profile = profile,
@@ -457,7 +467,8 @@ class ScreenCaptureService : Service() {
                     preAnalysis = prevHuman,
                     postAnalysis = postAnalysis,
                     pottedBall = humanPotted,
-                    keptTurn = humanKeptTurn
+                    keptTurn = humanKeptTurn,
+                    scratched = humanScratched
                 )
                 humanPreShotAnalysis = null
                 if (obs != null) {
@@ -520,14 +531,27 @@ class ScreenCaptureService : Service() {
         }
 
         val combinedTrimDeg = plannedDecision.action.angleTrimDeg + profile.learnedCutBiasDeg
-        val (aimX, aimY) = PoolVisionAnalyzer.computeAimPointWithTrim(shot, combinedTrimDeg)
+        val b = analysis.detectedTableBounds
+        val fL = b.getOrElse(0) { 0.18f }
+        val fT = b.getOrElse(1) { 0.21f }
+        val fR = b.getOrElse(2) { 0.80f }
+        val fB = b.getOrElse(3) { 0.91f }
+        val (aimX, aimY) = PoolVisionAnalyzer.computeAimPointWithTrim(
+            shot = shot,
+            angleTrimDeg = combinedTrimDeg,
+            aspectRatio = analysis.aspectRatio,
+            fLeft = fL,
+            fTop = fT,
+            fRight = fR,
+            fBottom = fB
+        )
 
-        // 1. Tap/aim accurately on the ghost-ball point on table felt to orient the cue stick
+        // 1. Tap along the isotropic ghost-ball ray on table felt to orient the cue stick accurately
         a11y.dispatchNormalizedTapAwait(aimX, aimY, holdMs = 55L)
         delay(240L)
 
         // 2. Pull the left vertical cue power slider down proportionally to Shot Force and release to fire
-        val powerFrac = plannedPowerFrac.coerceIn(0.22f, 0.95f)
+        val powerFrac = plannedPowerFrac.coerceIn(0.22f, 0.94f)
         val startBarY = (profile.powerBarTopY + 0.045f).coerceIn(0.24f, 0.42f)
         val endBarY = (startBarY + powerFrac * (profile.powerBarBottomY - startBarY).coerceAtLeast(0.35f))
             .coerceIn(startBarY + 0.08f, 0.90f)
@@ -548,7 +572,7 @@ class ScreenCaptureService : Service() {
             durationMs = 540L
         )
 
-        // 3. Wait for balls to roll & settle, then inspect post-shot outcome + physics
+        // 3. Wait for balls to roll & settle, then inspect post-shot outcome, mistakes, scratches & physics
         delay(3600L)
         val postBitmap = captureLatestBitmap()
         var stepReward = 0.2f
@@ -557,6 +581,7 @@ class ScreenCaptureService : Service() {
         var roundEnded = false
         var pottedBall = false
         var keptTurn = false
+        var scratched = false
         var postCueBall: com.example.domain.vision.DetectedBall? = null
 
         if (postBitmap != null) {
@@ -564,30 +589,48 @@ class ScreenCaptureService : Service() {
                 bitmap = postBitmap,
                 profile = profile,
                 seatOverride = telemetry.manualSeatSideOverride,
-                suitOverride = telemetry.manualSuitOverride
+                suitOverride = telemetry.manualSuitOverride,
+                failedShotPenalties = sessionFailedShotPenalties
             )
             postBitmap.recycle()
             postCueBall = postAnalysis.cueBall
             nextStateHash = postAnalysis.plannedShot?.stateHash ?: "POOL_POST"
 
+            val cueDisappeared = postCueBall == null
+            val cueInPocketMouth = postCueBall != null && !postAnalysis.isMyTurn &&
+                postAnalysis.pockets.any {
+                    hypot((postCueBall.normX - it.normX) * postAnalysis.aspectRatio, postCueBall.normY - it.normY) < 0.048f
+                }
+            scratched = cueDisappeared || cueInPocketMouth
+
             val pottedIncreased = postAnalysis.pottedOccupiedRatio > analysis.pottedOccupiedRatio + 0.05f
             val targetsReduced = postAnalysis.allTableTargets.size < analysis.allTableTargets.size
-            keptTurn = postAnalysis.isMyTurn
-            pottedBall = pottedIncreased || (keptTurn && targetsReduced)
+            keptTurn = !scratched && postAnalysis.isMyTurn
+            pottedBall = !scratched && (pottedIncreased || (keptTurn && targetsReduced))
 
             when {
+                scratched -> {
+                    stepReward = -4.5f
+                    outcomeNote = "SCRATCH: White cue ball pocketed! (-4.5)"
+                    roundEnded = true
+                    sessionFailedShotPenalties[shot.stateHash] =
+                        ((sessionFailedShotPenalties[shot.stateHash] ?: 0f) + 35f).coerceAtMost(90f)
+                }
                 pottedBall -> {
                     stepReward = +5.0f
                     outcomeNote = "Ball potted! Turn kept (+5.0)"
+                    sessionFailedShotPenalties.remove(shot.stateHash)
                 }
                 keptTurn -> {
                     stepReward = +1.4f
                     outcomeNote = "Turn retained (+1.4)"
                 }
                 else -> {
-                    stepReward = -1.6f
-                    outcomeNote = "Turn lost (-1.6)"
+                    stepReward = -2.0f
+                    outcomeNote = "Missed pocket & turn lost (-2.0)"
                     roundEnded = true
+                    sessionFailedShotPenalties[shot.stateHash] =
+                        ((sessionFailedShotPenalties[shot.stateHash] ?: 0f) + 22f).coerceAtMost(75f)
                 }
             }
         }
@@ -604,13 +647,19 @@ class ScreenCaptureService : Service() {
             postCueBall = postCueBall,
             pottedBall = pottedBall,
             keptTurn = keptTurn,
-            reward = stepReward
+            reward = stepReward,
+            scratched = scratched,
+            aspectRatio = analysis.aspectRatio
         )
         app.repository.insertShotPhysics(physicsOutcome.shotLog)
         app.repository.updateProfile(physicsOutcome.updatedProfile)
         BotServiceBridge.updateShotForceAndPhysics(
             shotPowerFraction = powerFrac,
             estimatedFriction = physicsOutcome.updatedProfile.learnedFrictionCoef
+        )
+        BotServiceBridge.updateOutcomeAndMistakes(
+            outcomeLabel = physicsOutcome.outcomeLabel,
+            mistakesCount = physicsOutcome.updatedProfile.totalMistakesLogged
         )
 
         app.trainingEngine.recordStep(

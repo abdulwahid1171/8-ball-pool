@@ -476,7 +476,11 @@ private fun ShotPhysicsCard(shot: ShotPhysicsEntity) {
                     color = CyanElectric
                 )
                 Text(
-                    text = if (shot.pottedBall) "POTTED (+5)" else if (shot.keptTurn) "KEPT TURN" else "MISSED",
+                    text = when (shot.outcomeLabel) {
+                        "CUE_SCRATCH" -> "SCRATCH (-4.5)"
+                        "POTTED", "HUMAN_POTTED" -> shot.outcomeLabel
+                        else -> if (shot.pottedBall) "POTTED" else if (shot.keptTurn) "KEPT TURN" else shot.outcomeLabel
+                    },
                     style = MaterialTheme.typography.labelSmall,
                     color = statusColor
                 )

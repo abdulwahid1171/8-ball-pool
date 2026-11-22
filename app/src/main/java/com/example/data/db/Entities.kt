@@ -49,6 +49,8 @@ data class TrainingProfileEntity(
     val preferredSuit: String = "AUTO", // "AUTO", "SOLIDS", "STRIPES"
     val watchHumanLearn: Boolean = true,
     val humanShotsObserved: Int = 0,
+    val totalMistakesLogged: Int = 0,
+    val scratchesCount: Int = 0,
     // Training stats
     val totalEpisodes: Int = 0,
     val totalSteps: Int = 0,
@@ -136,5 +138,6 @@ data class ShotPhysicsEntity(
     val pottedBall: Boolean,
     val keptTurn: Boolean,
     val reward: Float,
+    val outcomeLabel: String = "SETTLED",
     val timestamp: Long = System.currentTimeMillis()
 )

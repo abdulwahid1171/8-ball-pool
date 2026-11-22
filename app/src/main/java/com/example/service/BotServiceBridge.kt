@@ -43,6 +43,8 @@ data class LiveBotTelemetry(
     val manualSeatSideOverride: String? = null, // null | "LEFT" | "RIGHT" | "WATCH"
     val manualSuitOverride: String? = null,     // null | "AUTO" | "SOLIDS" | "STRIPES"
     val humanShotsObserved: Int = 0,
+    val lastOutcomeLabel: String = "READY",
+    val mistakesCount: Int = 0,
     val liveLogLines: List<String> = emptyList()
 )
 
@@ -96,6 +98,10 @@ object BotServiceBridge {
 
     fun setHumanShotsObserved(count: Int) {
         _telemetry.update { it.copy(humanShotsObserved = count) }
+    }
+
+    fun updateOutcomeAndMistakes(outcomeLabel: String, mistakesCount: Int) {
+        _telemetry.update { it.copy(lastOutcomeLabel = outcomeLabel, mistakesCount = mistakesCount) }
     }
 
     fun updateForegroundUiContext(

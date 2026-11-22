@@ -531,8 +531,14 @@ class BotFloatingOverlay(private val context: Context) {
         forceProgressBar?.progress = forcePct
 
         val lastPct = (t.lastShotPowerFraction * 100f).toInt()
+        val outcomeBadge = when {
+            t.lastOutcomeLabel.contains("SCRATCH") -> "⚠ SCRATCH"
+            t.lastOutcomeLabel.contains("MISSED") -> "✗ MISSED"
+            t.lastOutcomeLabel.contains("POTTED") -> "✓ POTTED"
+            else -> t.lastOutcomeLabel
+        }
         lastForceDetailText?.text =
-            "Last: ${if (lastPct > 0) "$lastPct%" else "--"} • Cut: ${t.plannedCutAngleDeg.toInt()}° • Fric: ${"%.2f".format(t.estimatedFriction)}"
+            "Last:${if (lastPct > 0) "$lastPct%" else "--"} • $outcomeBadge • Err:${t.mistakesCount}"
 
         onOffButton?.text = if (isPaused) "Turn ON" else "Pause"
         val btnBg = onOffButton?.background as? GradientDrawable
