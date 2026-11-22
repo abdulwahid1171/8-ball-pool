@@ -198,9 +198,19 @@ class GameBotAccessibilityService : AccessibilityService() {
     }
 
     private fun getScreenSizePx(): Pair<Int, Int> {
+        val dm = getSystemService(android.content.Context.DISPLAY_SERVICE) as android.hardware.display.DisplayManager
+        val display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)
+        if (display != null) {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                return metrics.widthPixels to metrics.heightPixels
+            }
+        }
         val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = wm.currentWindowMetrics.bounds
+            val bounds = wm.maximumWindowMetrics.bounds
             bounds.width().coerceAtLeast(1) to bounds.height().coerceAtLeast(1)
         } else {
             @Suppress("DEPRECATION")

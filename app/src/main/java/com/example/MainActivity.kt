@@ -81,6 +81,16 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onResume() {
+        super.onResume()
+        com.example.service.BotServiceBridge.setOwnAppForeground(true)
+    }
+
+    override fun onPause() {
+        com.example.service.BotServiceBridge.setOwnAppForeground(false)
+        super.onPause()
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

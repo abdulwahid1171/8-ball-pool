@@ -255,26 +255,60 @@ fun BotControlScreen(
                     }
                     Text(
                         text = if (isUrdu) {
-                            "دوسری گیم پر خودکار نشانہ لگانے (Swipe) اور پاور بار کھینچنے کے لیے Android Accessibility میں NeuroBot کو آن کریں۔"
+                            "دوسری گیم پر خودکار نشانہ لگانے (Swipe)، پاور بار کھینچنے اور چھوٹا فلوٹنگ آئیکون دکھانے کے لیے Android Accessibility میں NeuroBot کو آن کریں۔"
                         } else {
-                            "Required so NeuroBot can swipe to aim the cue, pull the power slider, or tap buttons inside external games."
+                            "Required so NeuroBot can show the mini floating icon, aim the cue, and pull the power slider inside external games."
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    OutlinedButton(
-                        onClick = {
-                            val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            context.startActivity(intent)
-                        },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .minimumInteractiveComponentSize()
-                            .testTag("btn_open_accessibility_settings")
+                    if (!telemetry.isAccessibilityConnected) {
+                        Text(
+                            text = if (isUrdu) {
+                                "نوٹ (Android 13+/Vivo): اگر Accessibility بٹن بند (grey) ہو تو پہلے 'App Info' کھول کر اوپر ⋮ سے 'Allow restricted settings' آن کریں۔"
+                            } else {
+                                "Tip (Android 13+/Vivo): If NeuroBot is greyed out in Accessibility, open App Info -> ⋮ -> Allow restricted settings first."
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            color = AmberPulse
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        Text(copy.openSettingsBtn)
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(intent)
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .minimumInteractiveComponentSize()
+                                .testTag("btn_open_accessibility_settings")
+                        ) {
+                            Text(copy.openSettingsBtn, maxLines = 1)
+                        }
+                        if (!telemetry.isAccessibilityConnected) {
+                            FilledTonalButton(
+                                onClick = {
+                                    val intent = Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        android.net.Uri.fromParts("package", context.packageName, null)
+                                    ).apply {
+                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    }
+                                    context.startActivity(intent)
+                                },
+                                modifier = Modifier
+                                    .minimumInteractiveComponentSize()
+                                    .testTag("btn_open_app_info")
+                            ) {
+                                Text(if (isUrdu) "App Info" else "App Info", maxLines = 1)
+                            }
+                        }
                     }
                 }
             }

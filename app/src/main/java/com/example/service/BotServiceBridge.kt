@@ -8,9 +8,11 @@ import kotlinx.coroutines.flow.update
 
 data class LiveBotTelemetry(
     val isAccessibilityConnected: Boolean = false,
+    val isOwnAppForeground: Boolean = true,
     val isScreenCaptureActive: Boolean = false,
     val isLiveBotRunning: Boolean = false,
     val isLiveBotPaused: Boolean = false,
+    val captureSizeLabel: String = "--",
     val activeForegroundPackage: String = "None",
     val clickableNodeCount: Int = 0,
     val detectedUiTexts: List<String> = emptyList(),
@@ -42,6 +44,14 @@ object BotServiceBridge {
 
     private val _telemetry = MutableStateFlow(LiveBotTelemetry())
     val telemetry: StateFlow<LiveBotTelemetry> = _telemetry.asStateFlow()
+
+    fun setOwnAppForeground(inForeground: Boolean) {
+        _telemetry.update { it.copy(isOwnAppForeground = inForeground) }
+    }
+
+    fun setCaptureSizeLabel(label: String) {
+        _telemetry.update { it.copy(captureSizeLabel = label) }
+    }
 
     fun setAccessibilityConnected(connected: Boolean) {
         _telemetry.update { it.copy(isAccessibilityConnected = connected) }

@@ -419,7 +419,7 @@ class BotFloatingOverlay(private val context: Context) {
         val turnLabel = if (t.isMyTurnDetected) "YOUR TURN" else "WAIT"
         val cueMark = if (t.isCueBallDetected) "Cue✓" else "Cue✗"
         val pocketStr = t.plannedPocketId ?: "-"
-        visionStatusText?.text = "$turnLabel | $cueMark | Balls: ${t.detectedTargetBallsCount} | Pkt: $pocketStr"
+        visionStatusText?.text = "${t.captureSizeLabel} • $turnLabel | $cueMark | Balls:${t.detectedTargetBallsCount} | Pkt:$pocketStr"
 
         val modeSuffix = if (t.manualPowerOverride != null) "Manual" else "AI Auto"
         forcePercentText?.text = "${forcePct}% ($modeSuffix)"

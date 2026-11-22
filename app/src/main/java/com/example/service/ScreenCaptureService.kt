@@ -69,6 +69,7 @@ class ScreenCaptureService : Service() {
 
     private var currentCaptureW = 0
     private var currentCaptureH = 0
+    private var cachedFrameBitmap: Bitmap? = null
 
     @Volatile
     private var isPaused = false
@@ -328,7 +329,24 @@ class ScreenCaptureService : Service() {
         profile: TrainingProfileEntity,
         forceManualShot: Boolean = false
     ) {
-        val bitmap = captureLatestBitmap() ?: return
+        val bitmap = captureLatestBitmap()
+        if (bitmap == null) {
+            BotServiceBridge.updatePoolObservation(
+                visionGrid = BotServiceBridge.telemetry.value.latestVisionGrid,
+                stateHash = "NO_FRAME",
+                isMyTurn = false,
+                targetsCount = 0,
+                cueX = null,
+                cueY = null,
+                targetX = null,
+                targetY = null,
+                pocketId = null,
+                summary = "Waiting for screen frame..."
+            )
+            return
+        }
+
+        BotServiceBridge.setCaptureSizeLabel("${bitmap.width}x${bitmap.height}")
         val analysis = PoolVisionAnalyzer.analyze(bitmap, profile)
         bitmap.recycle()
 
@@ -364,14 +382,14 @@ class ScreenCaptureService : Service() {
             pocketId = shot?.pocket?.id,
             cutAngleDeg = shot?.cutAngleDeg ?: 0f,
             plannedPowerFraction = plannedPowerFrac,
-            summary = analysis.summary
+            summary = "${bitmap.width}x${bitmap.height} • ${analysis.summary}"
         )
 
-        val pkg = telemetry.activeForegroundPackage
-        val isSystemOrOwn = isNonGameSystemPackage(pkg)
         val a11y = GameBotAccessibilityService.instance
 
-        if (isSystemOrOwn || a11y == null) {
+        // Block ONLY if NeuroBot's own UI is visibly resumed in foreground or Accessibility isn't connected.
+        // Do NOT block on stale AccessibilityEvent package names since OpenGL games like 8-Ball Pool rarely emit them!
+        if (telemetry.isOwnAppForeground || a11y == null) {
             return
         }
         if ((!analysis.isMyTurn && !forceManualShot) || shot == null || plannedDecision == null) {
@@ -665,38 +683,59 @@ class ScreenCaptureService : Service() {
 
     private fun captureLatestBitmap(): Bitmap? {
         val reader = imageReader ?: return null
-        val image = reader.acquireLatestImage() ?: return null
-        return try {
-            val plane = image.planes[0]
-            val buffer = plane.buffer
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * image.width
-            val fullBitmap = Bitmap.createBitmap(
-                image.width + rowPadding / pixelStride,
-                image.height,
-                Bitmap.Config.ARGB_8888
-            )
-            fullBitmap.copyPixelsFromBuffer(buffer)
-            if (rowPadding == 0) {
-                fullBitmap
-            } else {
-                val cropped = Bitmap.createBitmap(fullBitmap, 0, 0, image.width, image.height)
-                fullBitmap.recycle()
-                cropped
+        val image = reader.acquireLatestImage()
+        if (image != null) {
+            val fresh = try {
+                val plane = image.planes[0]
+                val buffer = plane.buffer
+                val pixelStride = plane.pixelStride
+                val rowStride = plane.rowStride
+                val rowPadding = rowStride - pixelStride * image.width
+                val fullBitmap = Bitmap.createBitmap(
+                    image.width + rowPadding / pixelStride,
+                    image.height,
+                    Bitmap.Config.ARGB_8888
+                )
+                fullBitmap.copyPixelsFromBuffer(buffer)
+                if (rowPadding == 0) {
+                    fullBitmap
+                } else {
+                    val cropped = Bitmap.createBitmap(fullBitmap, 0, 0, image.width, image.height)
+                    fullBitmap.recycle()
+                    cropped
+                }
+            } catch (_: Exception) {
+                null
+            } finally {
+                image.close()
             }
-        } catch (_: Exception) {
-            null
-        } finally {
-            image.close()
+            if (fresh != null) {
+                cachedFrameBitmap?.recycle()
+                cachedFrameBitmap = fresh.copy(Bitmap.Config.ARGB_8888, false)
+                return fresh
+            }
+        }
+        // Fallback to cached latest static screen (when game isn't redrawing while waiting on player's turn)
+        return cachedFrameBitmap?.let { cached ->
+            if (!cached.isRecycled) cached.copy(Bitmap.Config.ARGB_8888, false) else null
         }
     }
 
     private fun getDisplayMetricsInfo(): Triple<Int, Int, Int> {
-        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+        val display = dm.getDisplay(android.view.Display.DEFAULT_DISPLAY)
         val densityDpi = resources.displayMetrics.densityDpi
+        if (display != null) {
+            val metrics = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            display.getRealMetrics(metrics)
+            if (metrics.widthPixels > 0 && metrics.heightPixels > 0) {
+                return Triple(metrics.widthPixels, metrics.heightPixels, metrics.densityDpi)
+            }
+        }
+        val wm = getSystemService(WINDOW_SERVICE) as WindowManager
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = wm.currentWindowMetrics.bounds
+            val bounds = wm.maximumWindowMetrics.bounds
             Triple(bounds.width().coerceAtLeast(360), bounds.height().coerceAtLeast(640), densityDpi)
         } else {
             @Suppress("DEPRECATION")
@@ -729,6 +768,8 @@ class ScreenCaptureService : Service() {
             } catch (_: Exception) {}
         }
         displayListener = null
+        cachedFrameBitmap?.recycle()
+        cachedFrameBitmap = null
         try { virtualDisplay?.release() } catch (_: Exception) {}
         virtualDisplay = null
         try { imageReader?.close() } catch (_: Exception) {}

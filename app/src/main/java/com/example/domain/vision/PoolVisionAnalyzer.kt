@@ -81,8 +81,8 @@ object PoolVisionAnalyzer {
         val opponentTurnX = (1.0f - profile.turnBoxX).coerceIn(0.50f, 0.85f)
         val rightGreenRatio = measureGreenBorderRatio(bitmap, opponentTurnX, profile.turnBoxY)
         val powerBarVisible = measurePowerBarVisible(bitmap, profile.powerBarX)
-        val isMyTurn = (leftGreenRatio >= 0.045f && leftGreenRatio >= rightGreenRatio * 1.35f) ||
-            (leftGreenRatio >= 0.035f && powerBarVisible && rightGreenRatio < 0.03f)
+        val isMyTurn = (leftGreenRatio >= 0.025f && leftGreenRatio >= rightGreenRatio * 1.25f) ||
+            (powerBarVisible && rightGreenRatio < 0.045f)
 
         // 2. Measure potted balls indicator bar saturation/brightness
         val pottedRatio = measurePottedSlotsRatio(
@@ -490,8 +490,8 @@ object PoolVisionAnalyzer {
         val h = bitmap.height
         val cx = (centerX * w).toInt()
         val cy = (centerY * h).toInt()
-        val rx = (0.040f * w).toInt().coerceAtLeast(8)
-        val ry = (0.060f * h).toInt().coerceAtLeast(8)
+        val rx = (0.030f * w).toInt().coerceAtLeast(8)
+        val ry = (0.052f * h).toInt().coerceAtLeast(8)
         var greenCount = 0
         var total = 0
         val stepX = (rx / 6).coerceAtLeast(1)
@@ -504,7 +504,7 @@ object PoolVisionAnalyzer {
                 val r = Color.red(p)
                 val g = Color.green(p)
                 val b = Color.blue(p)
-                if (g > 135 && g > r + 40 && g > b + 40) {
+                if (g > 125 && g > r + 35 && g > b + 35) {
                     greenCount++
                 }
                 total++
@@ -516,20 +516,21 @@ object PoolVisionAnalyzer {
     private fun measurePowerBarVisible(bitmap: Bitmap, powerBarX: Float): Boolean {
         val w = bitmap.width
         val h = bitmap.height
-        val px = (powerBarX * w).toInt().coerceIn(0, w - 1)
         var brightWoodPixels = 0
         val samples = 10
         val hsv = FloatArray(3)
-        for (i in 0 until samples) {
-            val ny = 0.34f + (i.toFloat() / (samples - 1)) * 0.44f
-            val py = (ny * h).toInt().coerceIn(0, h - 1)
-            Color.colorToHSV(bitmap.getPixel(px, py), hsv)
-            // Cue handle inside left slider has warm cream/brown brightness vs dark empty blue slot
-            if (hsv[2] > 0.36f && hsv[0] in 15f..65f) {
-                brightWoodPixels++
+        for (dxNorm in listOf(-0.008f, 0f, 0.008f)) {
+            val px = ((powerBarX + dxNorm) * w).toInt().coerceIn(0, w - 1)
+            for (i in 0 until samples) {
+                val ny = 0.34f + (i.toFloat() / (samples - 1)) * 0.44f
+                val py = (ny * h).toInt().coerceIn(0, h - 1)
+                Color.colorToHSV(bitmap.getPixel(px, py), hsv)
+                if (hsv[2] > 0.34f && hsv[0] in 12f..68f) {
+                    brightWoodPixels++
+                }
             }
         }
-        return brightWoodPixels >= 4
+        return brightWoodPixels >= 6
     }
 
     private fun measurePottedSlotsRatio(
